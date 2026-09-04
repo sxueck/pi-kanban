@@ -1,0 +1,63 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+.pnp.*
+
+# Build / cache
+dist/
+build/
+out/
+coverage/
+*.tsbuildinfo
+.turbo/
+.cache/
+.vite/
+.parcel-cache/
+
+# Env and secrets (keep .env.example)
+.env
+.env.*
+!.env.example
+*.local
+
+# Logs / debug
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test / tooling
+.nyc_output/
+playwright-report/
+test-results/
+blob-report/
+
+# Database / local runtime
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editors / IDEs
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.swp
+*.swo
+*~
+
+# Optional local Docker / compose overrides
+docker-compose.override.yml
