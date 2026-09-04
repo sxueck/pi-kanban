@@ -1,0 +1,20 @@
+{
+	"name": "pi-kanban",
+	"private": true,
+	"version": "0.1.0",
+	"description": "Cloud web kanban for pi coding-agent sessions: live progress, remote approvals, session history by git project",
+	"scripts": {
+		"dev:server": "pnpm --filter @pi-kanban/server dev",
+		"dev:web": "pnpm --filter @pi-kanban/web dev",
+		"db:push": "pnpm --filter @pi-kanban/server db:push",
+		"db:studio": "pnpm --filter @pi-kanban/server db:studio",
+		"plugin:build": "pnpm --filter @pi-kanban/plugin build",
+		"plugin:install": "pnpm --filter @pi-kanban/plugin install-ext",
+		"test": "pnpm --filter @pi-kanban/plugin test",
+		"build": "pnpm -r build",
+		"typecheck": "pnpm -r typecheck"
+	},
+	"engines": {
+		"node": ">=22"
+	}
+}
