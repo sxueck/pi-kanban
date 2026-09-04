@@ -1,0 +1,19 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: pi
+      POSTGRES_PASSWORD: pi
+      POSTGRES_DB: pikanban
+    ports:
+      - "5432:5432"
+    volumes:
+      - pidb:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pi -d pikanban"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pidb:

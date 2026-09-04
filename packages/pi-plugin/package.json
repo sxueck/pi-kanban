@@ -1,0 +1,19 @@
+{
+	"name": "@pi-kanban/plugin",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 --outfile=dist/pi-kanban.js --legal-comments=none && node -e \"require('node:fs').renameSync('dist/pi-kanban.js','dist/pi-kanban.ts')\"",
+		"install-ext": "node scripts/install.mjs",
+		"test": "esbuild test/gate.test.ts --bundle --format=esm --platform=node --target=node22 --outfile=dist/gate.test.mjs --legal-comments=none && node dist/gate.test.mjs",
+		"typecheck": "tsc --noEmit"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "^0.84.3",
+		"@pi-kanban/shared": "workspace:*",
+		"@types/node": "^22.10.0",
+		"esbuild": "^0.25.0",
+		"typescript": "^5.7.0"
+	}
+}

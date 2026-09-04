@@ -1,0 +1,28 @@
+{
+	"name": "@pi-kanban/server",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "tsx watch src/index.ts",
+		"typecheck": "tsc --noEmit",
+		"build": "tsc",
+		"db:push": "drizzle-kit push",
+		"db:studio": "drizzle-kit studio"
+	},
+	"dependencies": {
+		"@hono/node-server": "^1.14.0",
+		"@pi-kanban/shared": "workspace:*",
+		"drizzle-orm": "^0.44.0",
+		"hono": "^4.7.0",
+		"postgres": "^3.4.5",
+		"ws": "^8.18.0"
+	},
+	"devDependencies": {
+		"@types/node": "^22.10.0",
+		"@types/ws": "^8.18.0",
+		"drizzle-kit": "^0.31.0",
+		"tsx": "^4.19.0",
+		"typescript": "^5.7.0"
+	}
+}
