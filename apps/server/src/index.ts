@@ -1,7 +1,13 @@
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { api } from "./api.js";
 import { agentWss, handleUpgrade } from "./ws.js";
 import { sweepExpiredApprovals, sweepOfflineSessions } from "./approvals.js";
+
+const rootEnvFile = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../.env");
+if (existsSync(rootEnvFile)) process.loadEnvFile(rootEnvFile);
 
 const port = Number(process.env.PORT ?? 8787);
 

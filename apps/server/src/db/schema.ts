@@ -17,8 +17,51 @@ import {
  * history by git project.
  */
 
+export const users = pgTable(
+	"users",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		username: text("username").notNull().unique(),
+		passwordHash: text("password_hash").notNull(),
+		role: text("role").notNull().default("member"),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(t) => [index("idx_users_username").on(t.username)],
+);
+
+export const webSessions = pgTable(
+	"web_sessions",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		userId: uuid("user_id")
+			.notNull()
+			.references(() => users.id, { onDelete: "cascade" }),
+		tokenHash: text("token_hash").notNull().unique(),
+		expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(t) => [index("idx_web_sessions_expiry").on(t.expiresAt)],
+);
+
+export const agentTokens = pgTable(
+	"agent_tokens",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		userId: uuid("user_id")
+			.notNull()
+			.references(() => users.id, { onDelete: "cascade" }),
+		name: text("name").notNull(),
+		tokenHash: text("token_hash").notNull().unique(),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+		lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+		revokedAt: timestamp("revoked_at", { withTimezone: true }),
+	},
+	(t) => [index("idx_agent_tokens_user").on(t.userId)],
+);
+
 export const machines = pgTable("machines", {
 	id: text("id").primaryKey(), // stable client-generated machine id
+	userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
 	name: text("name"),
 	lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
 	createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -41,6 +84,9 @@ export const sessions = pgTable(
 	"sessions",
 	{
 		id: text("id").primaryKey(), // pi session id
+		userId: uuid("user_id")
+			.notNull()
+			.references(() => users.id, { onDelete: "cascade" }),
 		machineId: text("machine_id").notNull(),
 		projectId: integer("project_id").references(() => projects.id),
 		cwd: text("cwd").notNull(),
@@ -59,6 +105,7 @@ export const sessions = pgTable(
 	(t) => [
 		index("idx_sessions_state_activity").on(t.state, t.lastActivityAt),
 		index("idx_sessions_project").on(t.projectId),
+		index("idx_sessions_user_activity").on(t.userId, t.lastActivityAt),
 	],
 );
 

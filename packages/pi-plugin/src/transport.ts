@@ -10,6 +10,10 @@ import { machineId, PLUGIN_VERSION } from "./config.js";
 
 const OUTBOX_CAP = 500;
 const CREATED_ACK_TIMEOUT_MS = 5_000;
+/** Connected but no inbound traffic for this long = black hole (sleep, NAT
+ * change); force a reconnect instead of waiting minutes for a TCP timeout. */
+const STALE_AFTER_MS = 90_000;
+const HTTP_HEARTBEAT_TIMEOUT_MS = 5_000;
 
 /** Cloud decision, or "offline" when the connection dropped before one arrived. */
 export type DecisionVerdict = "approved" | "denied" | "offline";
@@ -29,13 +33,25 @@ export class Transport {
 	private outbox: string[] = [];
 	private manuallyClosed = false;
 	private reconnectMs = 1_000;
+	private lastInboundAt = 0;
+	private readonly heartbeatUrl: string;
 	private decisionListeners = new Map<string, Set<DecisionListener>>();
 	private createdWaiters = new Map<string, (approvalId: string) => void>();
 
 	constructor(
 		private readonly url: string,
 		private readonly agentToken: string,
-	) {}
+	) {
+		// ws(s)://host:port/agent -> http(s)://host:port/agent/heartbeat
+		try {
+			const httpUrl = new URL(url.replace(/^ws(s?):/, "http$1:"));
+			httpUrl.pathname = `${httpUrl.pathname.replace(/\/$/, "")}/heartbeat`;
+			// Outbound URLs must be plain HTTP(S) — guards a misconfigured server URL.
+			this.heartbeatUrl = httpUrl.protocol === "http:" || httpUrl.protocol === "https:" ? httpUrl.toString() : "";
+		} catch {
+			this.heartbeatUrl = "";
+		}
+	}
 
 	connect(): void {
 		if (this.manuallyClosed || this.ws) return;
@@ -49,6 +65,7 @@ export class Transport {
 		this.ws = ws;
 		ws.onopen = () => {
 			this.reconnectMs = 1_000;
+			this.lastInboundAt = Date.now();
 			this.rawSend(this.hello());
 			while (this.outbox.length > 0) {
 				this.rawSend(this.outbox.shift()!);
@@ -76,6 +93,50 @@ export class Transport {
 		const raw = JSON.stringify(msg);
 		if (this.connected) this.rawSend(raw);
 		else if (this.outbox.length < OUTBOX_CAP) this.outbox.push(raw);
+	}
+
+	/**
+	 * Liveness tick, called every 30s:
+	 * - WS heartbeat while connected (the server's heartbeat_ack doubles as the
+	 *   downstream signal feeding the staleness watchdog below);
+	 * - watchdog: connected but no inbound traffic for STALE_AFTER_MS -> the
+	 *   socket is a black hole (heartbeats vanish server-side, sessions show
+	 *   offline) — close it now so the normal reconnect path takes over;
+	 * - HTTP heartbeat unconditionally — a stateless request immune to WS
+	 *   flakiness, so sessions stay alive on the board even while reconnecting.
+	 */
+	heartbeat(sessionIds: string[]): void {
+		const now = Date.now();
+		if (this.connected) {
+			if (this.lastInboundAt && now - this.lastInboundAt > STALE_AFTER_MS) {
+				console.error("[pi-kanban] connection stale (no server traffic); reconnecting");
+				this.ws?.close();
+				return;
+			}
+			this.send({ type: "heartbeat", sessionIds, timestamp: now });
+		}
+		void this.httpHeartbeat(sessionIds);
+	}
+
+	private async httpHeartbeat(sessionIds: string[]): Promise<void> {
+		if (!this.heartbeatUrl || !this.agentToken) return;
+		try {
+			// Client-side plugin dialing its own operator-configured server (same
+			// trust boundary as the WS URL); constructor already pins http(s).
+			// pi-lens-ignore: ts-ssrf
+			const res = await fetch(this.heartbeatUrl, {
+				method: "POST",
+				headers: {
+					authorization: `Bearer ${this.agentToken}`,
+					"content-type": "application/json",
+				},
+				body: JSON.stringify({ machineId: machineId(), sessionIds }),
+				signal: AbortSignal.timeout(HTTP_HEARTBEAT_TIMEOUT_MS),
+			});
+			if (!res.ok) console.error(`[pi-kanban] http heartbeat failed: HTTP ${res.status}`);
+		} catch {
+			// Server unreachable — the sweep marks sessions offline; reconnect keeps trying.
+		}
 	}
 
 	async requestApproval(
@@ -125,6 +186,7 @@ export class Transport {
 	}
 
 	private onDownstream(raw: string): void {
+		this.lastInboundAt = Date.now();
 		let msg: DownstreamMessage;
 		try {
 			msg = JSON.parse(raw) as DownstreamMessage;
@@ -154,7 +216,9 @@ export class Transport {
 	private scheduleReconnect(): void {
 		if (this.manuallyClosed) return;
 		setTimeout(() => this.connect(), this.reconnectMs).unref?.();
-		this.reconnectMs = Math.min(this.reconnectMs * 2, 30_000);
+		// Cap low: the approval channel is down until we are back, and the HTTP
+		// heartbeat already covers board liveness in the meantime.
+		this.reconnectMs = Math.min(this.reconnectMs * 2, 10_000);
 	}
 
 	private rawSend(raw: string): void {

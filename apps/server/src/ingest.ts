@@ -1,11 +1,10 @@
 import path from "node:path";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNull, or, sql } from "drizzle-orm";
 import type {
 	ApprovalCreatedMessage,
 	DownstreamMessage,
 	UpstreamMessage,
 } from "@pi-kanban/shared";
-import { truncate } from "@pi-kanban/shared";
 import { db } from "./db/index.js";
 import {
 	approvals,
@@ -23,20 +22,26 @@ import { publish } from "./bus.js";
 export interface ConnContext {
 	machineId: string;
 	machineName?: string;
+	userId: string;
 }
-
-const TITLE_MAX = 80;
 
 export async function handleUpstream(
 	msg: UpstreamMessage,
 	conn: ConnContext,
 ): Promise<DownstreamMessage[]> {
+	const sessionId = sessionIdFrom(msg);
+	if (sessionId && msg.type !== "session_start" && !(await sessionBelongsToUser(sessionId, conn.userId))) {
+		throw new Error("session does not belong to the authenticated agent user");
+	}
 	switch (msg.type) {
 		case "session_start":
 			await onSessionStart(msg, conn);
 			return [];
 		case "session_end":
 			await onSessionEnd(msg);
+			return [];
+		case "session_title":
+			await onSessionTitle(msg);
 			return [];
 		case "turn_start":
 			await onTurnStart(msg);
@@ -62,8 +67,7 @@ export async function handleUpstream(
 			await onApprovalLocalResolution(msg);
 			return [];
 		case "heartbeat":
-			await onHeartbeat(msg, conn);
-			return [];
+			return [await onHeartbeat(msg, conn)];
 		default:
 			return [];
 	}
@@ -129,15 +133,32 @@ async function onSessionStart(
 	msg: Extract<UpstreamMessage, { type: "session_start" }>,
 	conn: ConnContext,
 ) {
+	const existing = await db
+		.select({ userId: sessions.userId })
+		.from(sessions)
+		.where(eq(sessions.id, msg.sessionId))
+		.limit(1);
+	if (existing[0] && existing[0].userId !== conn.userId) {
+		throw new Error("session id belongs to another user");
+	}
+	await db
+		.insert(machines)
+		.values({ id: conn.machineId, userId: conn.userId, name: conn.machineName ?? null, lastSeenAt: new Date() })
+		.onConflictDoUpdate({
+			target: machines.id,
+			set: { userId: conn.userId, name: conn.machineName ?? null, lastSeenAt: new Date() },
+		});
 	const projectId = await resolveProjectId(msg.cwd, msg.gitRemote);
 	await db
 		.insert(sessions)
 		.values({
 			id: msg.sessionId,
+			userId: conn.userId,
 			machineId: conn.machineId,
 			projectId,
 			cwd: msg.cwd,
 			branch: msg.gitBranch,
+			title: msg.title ?? null,
 			state: "idle",
 			startedAt: new Date(msg.startedAt),
 			lastActivityAt: new Date(msg.startedAt),
@@ -150,6 +171,7 @@ async function onSessionStart(
 				projectId,
 				cwd: msg.cwd,
 				branch: msg.gitBranch,
+				title: msg.title === undefined ? sessions.title : msg.title,
 				// A resumed session re-enters the living set.
 				state: sql`case when ${sessions.state} = 'finished' then 'idle' else ${sessions.state} end`,
 				endedAt: null,
@@ -179,10 +201,20 @@ async function onSessionEnd(
 	publish({ type: "session_update", sessionId: msg.sessionId });
 }
 
+async function onSessionTitle(
+	msg: Extract<UpstreamMessage, { type: "session_title" }>,
+) {
+	await db
+		.update(sessions)
+		.set({ title: msg.title })
+		.where(eq(sessions.id, msg.sessionId));
+	publish({ type: "session_update", sessionId: msg.sessionId });
+}
+
 async function onTurnStart(
 	msg: Extract<UpstreamMessage, { type: "turn_start" }>,
 ) {
-	await db
+	const inserted = await db
 		.insert(turns)
 		.values({
 			sessionId: msg.sessionId,
@@ -191,17 +223,14 @@ async function onTurnStart(
 			state: "running",
 			startedAt: new Date(msg.startedAt),
 		})
-		.onConflictDoUpdate({
-			target: [turns.sessionId, turns.position],
-			set: { state: "running", endedAt: null, startedAt: new Date(msg.startedAt) },
-		});
+		.onConflictDoNothing({ target: [turns.sessionId, turns.position] })
+		.returning({ id: turns.id });
 	await db
 		.update(sessions)
 		.set({
 			state: "running",
 			lastActivityAt: new Date(msg.startedAt),
-			title: sql`coalesce(${sessions.title}, ${truncate(msg.prompt, TITLE_MAX)})`,
-			turnCount: sql`greatest(${sessions.turnCount}, ${msg.position})`,
+			...(inserted.length > 0 ? { turnCount: sql`${sessions.turnCount} + 1` } : {}),
 		})
 		.where(eq(sessions.id, msg.sessionId));
 	publish({ type: "session_update", sessionId: msg.sessionId });
@@ -358,30 +387,49 @@ async function onApprovalLocalResolution(
 			note: msg.note ?? null,
 		})
 		.where(and(eq(approvals.id, msg.approvalId), eq(approvals.status, "pending")));
-	await recomputeSessionState(msg.sessionId);
+	await recomputeSessionState(msg.sessionId, new Date());
 	publish({ type: "approval_update", approvalId: msg.approvalId, sessionId: msg.sessionId });
 }
 
+/** Refresh liveness timestamps; ack gives the plugin a downstream liveness signal. */
 async function onHeartbeat(
 	msg: Extract<UpstreamMessage, { type: "heartbeat" }>,
 	conn: ConnContext,
-) {
+): Promise<DownstreamMessage> {
 	const now = new Date();
 	await db
 		.update(machines)
-		.set({ lastSeenAt: now, name: conn.machineName ?? null })
+		.set({ userId: conn.userId, lastSeenAt: now, name: conn.machineName ?? null })
 		.where(eq(machines.id, conn.machineId));
 	if (msg.sessionIds.length > 0) {
+		const owned = await db
+			.select({ id: sessions.id })
+			.from(sessions)
+			.where(and(or(...msg.sessionIds.map((id) => eq(sessions.id, id))), eq(sessions.userId, conn.userId), sql`${sessions.state} <> 'finished'`));
+		const sessionIds = owned.map((session) => session.id);
+		if (sessionIds.length === 0) return { type: "heartbeat_ack", serverTime: Date.now() };
 		await db
 			.update(sessions)
 			.set({ lastHeartbeatAt: now })
-			.where(
-				and(
-					sql`${sessions.id} = any(${msg.sessionIds})`,
-					sql`${sessions.state} <> 'finished'`,
-				),
-			);
+			.where(or(...sessionIds.map((id) => eq(sessions.id, id))));
+		for (const sessionId of sessionIds) {
+			if (await recomputeSessionState(sessionId)) publish({ type: "session_update", sessionId });
+		}
 	}
+	return { type: "heartbeat_ack", serverTime: Date.now() };
+}
+
+function sessionIdFrom(msg: UpstreamMessage): string | undefined {
+	return "sessionId" in msg ? msg.sessionId : undefined;
+}
+
+async function sessionBelongsToUser(sessionId: string, userId: string): Promise<boolean> {
+	const [session] = await db
+		.select({ id: sessions.id })
+		.from(sessions)
+		.where(and(eq(sessions.id, sessionId), eq(sessions.userId, userId)))
+		.limit(1);
+	return Boolean(session);
 }
 
 // --- state derivation ---------------------------------------------------------
@@ -389,14 +437,14 @@ async function onHeartbeat(
 /** Derive state from first principles: open approvals > open turn > idle. */
 export async function recomputeSessionState(
 	sessionId: string,
-	at: Date = new Date(),
-): Promise<void> {
+	activityAt?: Date,
+): Promise<boolean> {
 	const [session] = await db
 		.select({ state: sessions.state })
 		.from(sessions)
 		.where(eq(sessions.id, sessionId))
 		.limit(1);
-	if (!session || session.state === "finished") return;
+	if (!session || session.state === "finished") return false;
 
 	const pending = await db
 		.select({ count: sql<number>`count(*)::int` })
@@ -407,14 +455,15 @@ export async function recomputeSessionState(
 		.from(turns)
 		.where(and(eq(turns.sessionId, sessionId), eq(turns.state, "running")));
 
-	const state =
-		(pending[0]?.count ?? 0) > 0
-			? "waiting_approval"
-			: (openTurns[0]?.count ?? 0) > 0
-				? "running"
-				: "idle";
+	let state: "waiting_approval" | "running" | "idle" = "idle";
+	if ((pending[0]?.count ?? 0) > 0) state = "waiting_approval";
+	else if ((openTurns[0]?.count ?? 0) > 0) state = "running";
+	const changed = session.state !== state;
+	const updates: { state: typeof state; lastActivityAt?: Date } = { state };
+	if (activityAt) updates.lastActivityAt = activityAt;
 	await db
 		.update(sessions)
-		.set({ state, lastActivityAt: at })
+		.set(updates)
 		.where(eq(sessions.id, sessionId));
+	return changed;
 }

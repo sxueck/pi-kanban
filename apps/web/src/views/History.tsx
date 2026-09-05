@@ -1,26 +1,35 @@
 import { Link, useParams } from "react-router-dom";
 import type { HistorySessionDTO, ProjectHistoryDTO } from "@pi-kanban/shared";
 import { fmtCost, fmtTime, useResource } from "../api.js";
+import { useI18n } from "../i18n.js";
+import { EmptyHistoryIllustration } from "../components/illustrations.js";
 
 export function History() {
+	const { t } = useI18n();
 	const { data, error } = useResource<ProjectHistoryDTO[]>("/api/history");
 	if (error) return <div className="error">{String(error)}</div>;
 	const projects = data ?? [];
 	return (
 		<div className="history">
 			<header>
-				<h2>Projects</h2>
+				<h1 className="page-title">{t("history.title")}</h1>
 			</header>
-			{projects.length === 0 && <p className="muted">no projects observed yet</p>}
+			{projects.length === 0 && (
+				<div className="empty">
+					<EmptyHistoryIllustration />
+					<h2>{t("history.empty")}</h2>
+					<p>{t("history.emptyHint")}</p>
+				</div>
+			)}
 			<div className="cards">
 				{projects.map((p) => (
 					<Link key={p.id} to={`/history/project/${p.id}`} className="card project-card">
 						<div className="card-title">{p.name}</div>
 						{p.gitRemote && <div className="mono muted">{p.gitRemote}</div>}
 						<div className="card-meta">
-							<span>{p.sessionCount} sessions</span>
+							<span>{t("history.sessions", { n: p.sessionCount })}</span>
 							<span>{fmtCost(p.totalCostUsd)}</span>
-							{p.lastActivityAt && <span>last {fmtTime(p.lastActivityAt)}</span>}
+							{p.lastActivityAt && <span>{t("history.last", { time: fmtTime(p.lastActivityAt) })}</span>}
 						</div>
 					</Link>
 				))}
@@ -30,6 +39,7 @@ export function History() {
 }
 
 export function ProjectSessions() {
+	const { t } = useI18n();
 	const { id } = useParams<{ id: string }>();
 	const { data, error } = useResource<HistorySessionDTO[]>(
 		id ? `/api/projects/${id}/sessions` : null,
@@ -39,16 +49,16 @@ export function ProjectSessions() {
 	return (
 		<div className="history">
 			<header>
-				<h2>Sessions</h2>
+				<h1 className="page-title">{t("sessions.title")}</h1>
 			</header>
 			<table className="table">
 				<thead>
 					<tr>
-						<th>Title</th>
-						<th>State</th>
-						<th>Turns</th>
-						<th>Cost</th>
-						<th>Started</th>
+						<th>{t("th.title")}</th>
+						<th>{t("th.state")}</th>
+						<th>{t("th.turns")}</th>
+						<th>{t("th.cost")}</th>
+						<th>{t("th.started")}</th>
 					</tr>
 				</thead>
 				<tbody>

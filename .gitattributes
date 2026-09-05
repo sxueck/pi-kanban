@@ -1,0 +1,3 @@
+# Normalize all text to LF: the edit tool's CRLF writes on Windows otherwise
+# produce whole-file diffs and pollute blame.
+* text=auto eol=lf

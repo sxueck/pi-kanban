@@ -1,17 +1,23 @@
 import { Link } from "react-router-dom";
-import type { BoardSession, SessionState } from "@pi-kanban/shared";
+import type { BoardSession, RecentSessionDTO, SessionState } from "@pi-kanban/shared";
 import { fmtCost, fmtElapsed, useResource } from "../api.js";
+import { useI18n } from "../i18n.js";
+import type { MsgKey } from "../i18n.js";
+import { StateIcon } from "../components/icons.js";
+import { EmptyBoardIllustration } from "../components/illustrations.js";
 
-const SECTION_ORDER: Array<{ state: SessionState; title: string; hint: string }> = [
-	{ state: "waiting_approval", title: "WAITING APPROVAL", hint: "blocked on your decision" },
-	{ state: "running", title: "RUNNING", hint: "oldest first" },
-	{ state: "idle", title: "IDLE", hint: "recently active first" },
-	{ state: "offline", title: "OFFLINE", hint: "heartbeat stale" },
+const SECTION_ORDER: Array<{ state: SessionState }> = [
+	{ state: "waiting_approval" },
+	{ state: "running" },
+	{ state: "idle" },
+	{ state: "offline" },
 ];
 
 export function Board() {
+	const { t } = useI18n();
 	const { data, error, loading } = useResource<BoardSession[]>("/api/board");
-	if (error) return <div className="error">{String(error)}</div>;
+	const { data: recent, error: recentError } = useResource<RecentSessionDTO[]>("/api/sessions/recent");
+	if (error || recentError) return <div className="error">{String(error ?? recentError)}</div>;
 	if (loading && !data) return <div className="empty">loading…</div>;
 
 	const sessions = data ?? [];
@@ -24,18 +30,32 @@ export function Board() {
 
 	return (
 		<div className="board">
-			{SECTION_ORDER.map(({ state, title, hint }) => {
+			<section className="board-section recent-section">
+				<header>
+					<h2>{t("board.recent")}</h2>
+				</header>
+				{(recent?.length ?? 0) === 0 ? (
+					<p className="muted">{t("board.noRecent")}</p>
+				) : (
+					<div className="recent-cards">
+						{recent?.map((session) => <RecentSessionCard key={session.id} session={session} />)}
+					</div>
+				)}
+			</section>
+			{SECTION_ORDER.map(({ state }) => {
 				const list = byState.get(state) ?? [];
 				if (state !== "waiting_approval" && list.length === 0) return null;
 				return (
 					<section key={state} className={`board-section section-${state}`}>
 						<header>
-							<h2>{title}</h2>
+							<h2>
+								<StateIcon state={state} /> {t(`state.${state}` as MsgKey)}
+							</h2>
 							<span className="count">{list.length}</span>
-							<span className="hint">{hint}</span>
+							<span className="hint">{t(`board.hint.${state}` as MsgKey)}</span>
 						</header>
 						{list.length === 0 ? (
-							<p className="muted">nothing waiting on you 🎉</p>
+							<p className="muted">{t("board.nothing_waiting")}</p>
 						) : (
 							<div className="cards">
 								{list.map((s) => (
@@ -48,24 +68,38 @@ export function Board() {
 			})}
 			{sessions.length === 0 && (
 				<div className="empty">
-					<h2>No live pi sessions</h2>
-					<p>Install the plugin on a machine running pi, then start a session.</p>
+					<EmptyBoardIllustration />
+					<h2>{t("board.empty")}</h2>
+					<p>{t("board.emptyHint")}</p>
 				</div>
 			)}
 		</div>
 	);
 }
 
+function RecentSessionCard({ session }: { session: RecentSessionDTO }) {
+	const { t } = useI18n();
+	return (
+		<Link to={`/sessions/${session.id}`} className="recent-card">
+			<span className={`recent-state state-${session.state}`}>{t(`state.${session.state}` as MsgKey)}</span>
+			<strong>{session.title ?? t("board.untitled")}</strong>
+			<span className="recent-project">{session.projectName}</span>
+			<span className="recent-meta">{t("board.turns", { n: session.turnCount })} · {fmtElapsed(session.lastActivityAt)}</span>
+		</Link>
+	);
+}
+
 function SessionCard({ session: s }: { session: BoardSession }) {
+	const { t } = useI18n();
 	const todo = s.todo;
 	return (
 		<Link to={`/sessions/${s.id}`} className={`card state-${s.state}`}>
 			<div className="card-head">
 				<span className="project">{s.projectName}</span>
 				{s.branch && <span className="branch">{s.branch}</span>}
-				<span className={`state state-${s.state}`}>{s.state.replace("_", " ")}</span>
+				<span className={`state state-${s.state}`}>{t(`state.${s.state}` as MsgKey)}</span>
 			</div>
-			<div className="card-title">{s.title ?? "(untitled session)"}</div>
+			<div className="card-title">{s.title ?? t("board.untitled")}</div>
 			{todo && (
 				<div className="todo-progress">
 					<div className="todo-bar">
@@ -88,11 +122,11 @@ function SessionCard({ session: s }: { session: BoardSession }) {
 			)}
 			<div className="card-meta">
 				<span>{fmtElapsed(s.startedAt, s.lastActivityAt)}</span>
-				<span>{s.turnCount} turns</span>
+				<span>{t("board.turns", { n: s.turnCount })}</span>
 				{s.modelId && <span className="mono">{s.modelId}</span>}
 				<span>{fmtCost(s.totalCostUsd)}</span>
 				{s.pendingApprovals > 0 && (
-					<span className="approval-badge">{s.pendingApprovals} pending approval</span>
+					<span className="approval-badge">{t("board.pendingApproval", { n: s.pendingApprovals })}</span>
 				)}
 			</div>
 		</Link>

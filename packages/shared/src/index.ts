@@ -27,6 +27,8 @@ export interface SessionStartMessage {
 	cwd: string;
 	gitRemote?: string;
 	gitBranch?: string;
+	/** Pi session name shown by /resume; null explicitly clears a prior title. */
+	title?: string | null;
 	reason: string;
 	startedAt: number;
 }
@@ -36,6 +38,12 @@ export interface SessionEndMessage {
 	sessionId: string;
 	reason: string;
 	endedAt: number;
+}
+
+export interface SessionTitleMessage {
+	type: "session_title";
+	sessionId: string;
+	title: string | null;
 }
 
 export interface TurnStartMessage {
@@ -131,6 +139,7 @@ export type UpstreamMessage =
 	| HelloMessage
 	| SessionStartMessage
 	| SessionEndMessage
+	| SessionTitleMessage
 	| TurnStartMessage
 	| TurnEndMessage
 	| MessageReportMessage
@@ -166,6 +175,11 @@ export interface ApprovalDecisionMessage {
 	note?: string;
 }
 
+export interface HeartbeatAckMessage {
+	type: "heartbeat_ack";
+	serverTime: number;
+}
+
 export interface ServerErrorMessage {
 	type: "error";
 	message: string;
@@ -175,6 +189,7 @@ export type DownstreamMessage =
 	| HelloAckMessage
 	| ApprovalCreatedMessage
 	| ApprovalDecisionMessage
+	| HeartbeatAckMessage
 	| ServerErrorMessage;
 
 // ---------------------------------------------------------------------------
@@ -250,6 +265,29 @@ export interface ProjectHistoryDTO {
 	lastActivityAt?: number;
 }
 
+export interface UserDTO {
+	id: string;
+	username: string;
+	role: "admin" | "member";
+	createdAt?: number;
+}
+
+export interface AgentTokenDTO {
+	id: string;
+	name: string;
+	createdAt: number;
+	lastUsedAt?: number;
+}
+
+export interface RecentSessionDTO {
+	id: string;
+	title?: string;
+	state: SessionState;
+	projectName: string;
+	turnCount: number;
+	lastActivityAt: number;
+}
+
 export interface HistorySessionDTO {
 	id: string;
 	title?: string;
@@ -261,11 +299,20 @@ export interface HistorySessionDTO {
 }
 
 export interface TurnDTO {
+	/** First raw turn position in this rendered logical turn. */
 	position: number;
+	/** Raw turn positions represented by this logical turn. */
+	positions?: number[];
 	prompt: string;
 	state: "running" | "done";
 	startedAt: number;
 	endedAt?: number;
+	/**
+	 * Internal model steps merged into this logical turn. Legacy plugins sent
+	 * one turn per agent-loop step (all sharing the prompt); the server
+	 * collapses those, so steps > 1 marks legacy/merged rows.
+	 */
+	steps?: number;
 }
 
 export interface MessageDTO {
@@ -275,6 +322,8 @@ export interface MessageDTO {
 	excerpt?: string;
 	customType?: string;
 	costUsd?: number;
+	/** Total tokens (input + output, incl. cache) derived from raw usage. */
+	tokens?: number;
 	timestamp: number;
 }
 
@@ -295,6 +344,8 @@ export interface SessionDetailDTO extends BoardSession {
 	toolCalls: ToolCallDTO[];
 	todos: Array<{ position: number; content: string; state: string }>;
 	approvals: ApprovalDTO[];
+	/** Whole-session token total; `messages` is capped at the latest 300 rows. */
+	totalTokens?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -331,7 +382,8 @@ export interface ReportConfig {
 }
 
 export interface PluginConfig {
-	server: { url: string; agentToken: string };
+	/** The agent token never lives here — it is read from PI_KANBAN_TOKEN. */
+	server: { url: string };
 	gate: GateConfig;
 	report: ReportConfig;
 }

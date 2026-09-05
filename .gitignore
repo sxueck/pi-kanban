@@ -44,6 +44,8 @@ blob-report/
 .DS_Store
 Thumbs.db
 Desktop.ini
+# Git Bash turns `cmd > NUL` redirects into a real file named NUL
+NUL
 
 # Editors / IDEs
 .idea/

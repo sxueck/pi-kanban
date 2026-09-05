@@ -2,8 +2,9 @@ import { execFile } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncate } from "@pi-kanban/shared";
 import type { TodoSnapshotMessage } from "@pi-kanban/shared";
-import { loadConfig } from "./config.js";
+import { agentToken, loadConfig } from "./config.js";
 import { Transport } from "./transport.js";
+import { TurnState } from "./turn-state.js";
 import { runGate, type GateDeps } from "./gate.js";
 
 /**
@@ -12,18 +13,19 @@ import { runGate, type GateDeps } from "./gate.js";
  * approval. Runtime deps are bundled; pi package is type-only.
  */
 export default function (pi: ExtensionAPI): void {
-	const config = loadConfig();
-	if (!config.server.agentToken) {
+ const config = loadConfig();
+	const token = agentToken();
+	if (!token) {
 		// No token = never connectable = the plugin stays fully inert (the gate
 		// bypasses too; see gate.ts). One line so an empty dashboard is diagnosable.
-		console.error("[pi-kanban] no agent token configured (PI_KANBAN_TOKEN or ~/.pi/agent/pi-kanban.json)");
+		console.error("[pi-kanban] no agent token configured — set the PI_KANBAN_TOKEN environment variable (e.g. in ~/.zshrc)");
 	}
-	const transport = new Transport(config.server.url, config.server.agentToken);
+	const transport = new Transport(config.server.url, token);
 	transport.connect();
 
 	let sessionId: string | null = null;
 	let messagePosition = 0;
-	let currentTurn: number | null = null;
+	const turns = new TurnState();
 	let lastPrompt = "";
 	let lastTodoHash = "";
 	const toolStartTimes = new Map<string, number>();
@@ -32,8 +34,16 @@ export default function (pi: ExtensionAPI): void {
 		gate: config.gate,
 		transport,
 		getSessionId: () => sessionId,
-		getTurnPosition: () => (currentTurn ? currentTurn + 1 : undefined),
+		getTurnPosition: () => turns.current,
 	};
+
+	const heartbeat = setInterval(() => {
+		// transport.heartbeat: WS heartbeat + stale-socket watchdog while
+		// connected, plus the stateless HTTP heartbeat that keeps sessions on
+		// the board alive even while the WS is down/reconnecting.
+		transport.heartbeat(sessionId ? [sessionId] : []);
+	}, 30_000);
+	heartbeat.unref();
 
 	// --- session lifecycle -----------------------------------------------------
 
@@ -42,7 +52,7 @@ export default function (pi: ExtensionAPI): void {
 		if (!id) return; // ephemeral session (--no-session): nothing to track
 		sessionId = id;
 		messagePosition = 0;
-		currentTurn = null;
+		turns.reset();
 		lastTodoHash = "";
 		const [gitRemote, gitBranch] = await gitInfo(ctx.cwd);
 		transport.send({
@@ -51,49 +61,55 @@ export default function (pi: ExtensionAPI): void {
 			cwd: ctx.cwd,
 			gitRemote,
 			gitBranch,
+			title: pi.getSessionName() ?? null,
 			reason: event.reason,
 			startedAt: Date.now(),
 		});
 	});
 
-	pi.on("session_shutdown", async (event) => {
+	pi.on("session_info_changed", (event) => {
 		if (!sessionId) return;
-		transport.send({
-			type: "session_end",
-			sessionId,
-			reason: event.reason,
-			endedAt: Date.now(),
-		});
+		transport.send({ type: "session_title", sessionId, title: event.name ?? null });
+	});
+
+	pi.on("session_shutdown", (event) => {
+		if (sessionId) {
+			transport.send({
+				type: "session_end",
+				sessionId,
+				reason: event.reason,
+				endedAt: Date.now(),
+			});
+		}
+		clearInterval(heartbeat);
+		transport.close();
 	});
 
 	// --- turns -------------------------------------------------------------------
 
 	pi.on("before_agent_start", async (event) => {
 		lastPrompt = event.prompt;
-	});
-
-	pi.on("turn_start", async (event) => {
 		if (!sessionId) return;
-		currentTurn = event.turnIndex;
+		const position = turns.start();
 		transport.send({
 			type: "turn_start",
 			sessionId,
-			position: event.turnIndex + 1,
+			position,
 			prompt: lastPrompt,
 			startedAt: Date.now(),
 		});
 	});
 
-	pi.on("turn_end", async (_event, ctx) => {
-		if (!sessionId) return;
+	pi.on("agent_end", async (_event, ctx) => {
+		const position = turns.finish();
+		if (!sessionId || position == null) return;
 		transport.send({
 			type: "turn_end",
 			sessionId,
-			position: (currentTurn ?? 0) + 1,
+			position,
 			endedAt: Date.now(),
 		});
 		await reportTodoSnapshot(ctx);
-		currentTurn = null;
 	});
 
 	// --- message stream ------------------------------------------------------------
@@ -109,7 +125,7 @@ export default function (pi: ExtensionAPI): void {
 		transport.send({
 			type: "message",
 			sessionId,
-			turnPosition: currentTurn != null ? currentTurn + 1 : undefined,
+			turnPosition: turns.current,
 			position: messagePosition,
 			role: (message.role as "user" | "assistant" | "toolResult") ?? "custom",
 			excerpt: excerpt(extractText(message.content)),
@@ -128,7 +144,7 @@ export default function (pi: ExtensionAPI): void {
 		transport.send({
 			type: "tool_call",
 			sessionId,
-			turnPosition: currentTurn != null ? currentTurn + 1 : undefined,
+			turnPosition: turns.current,
 			toolCallId: event.toolCallId,
 			toolName: event.toolName,
 			input: config.report.reportToolInputs ? event.args : undefined,
@@ -156,20 +172,6 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("tool_call", async (event, ctx) => {
 		return runGate(gate, event, ctx);
 	});
-
-	// --- heartbeat ------------------------------------------------------------------------
-
-	const heartbeat = setInterval(() => {
-		// Offline: skip entirely — heartbeats are only meaningful live, and
-		// queueing them would evict real session events from the outbox.
-		if (!transport.connected) return;
-		transport.send({
-			type: "heartbeat",
-			sessionIds: sessionId ? [sessionId] : [],
-			timestamp: Date.now(),
-		});
-	}, 30_000);
-	heartbeat.unref?.();
 
 	// --- helpers ------------------------------------------------------------------------------
 
