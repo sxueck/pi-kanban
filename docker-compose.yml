@@ -15,5 +15,25 @@ services:
       timeout: 3s
       retries: 10
 
+  kanban:
+    image: ghcr.io/sxueck/pi-kanban:latest
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    env_file: .env
+    environment:
+      # Inside compose the DB is the "db" service, not localhost; set
+      # KANBAN_DB_URL here if you change the db service credentials.
+      DATABASE_URL: ${KANBAN_DB_URL:-postgres://pi:pi@db:5432/pikanban}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8787/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
 volumes:
   pidb:

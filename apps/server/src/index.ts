@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { api } from "./api.js";
+import { runMigrations } from "./migrate.js";
 import { agentWss, handleUpgrade } from "./ws.js";
 import { sweepExpiredApprovals, sweepOfflineSessions } from "./approvals.js";
 import { runDueInspections } from "./inspector.js";
@@ -11,6 +12,13 @@ const rootEnvFile = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 if (existsSync(rootEnvFile)) process.loadEnvFile(rootEnvFile);
 
 const port = Number(process.env.PORT ?? 8787);
+
+try {
+	await runMigrations();
+} catch (error) {
+	console.error("[pi-kanban] migration failed:", error instanceof Error ? error.message : error);
+	process.exit(1);
+}
 
 const server = serve({ fetch: api.fetch, port }, (info) => {
 	console.log(`[pi-kanban] api+ws listening on http://localhost:${info.port}`);

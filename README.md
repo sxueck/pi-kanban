@@ -73,6 +73,17 @@ The administrator creates other users from **Account**. Each user then creates a
 machine Agent Token from **Account** before installing the plugin on their own
 machine.
 
+## Docker deployment
+
+`ghcr.io/sxueck/pi-kanban` (built by `.github/workflows/docker.yml` on every
+push to `main` and `v*` tag) serves the dashboard, API, and agent WebSocket
+from one port:
+
+```bash
+cp .env.example .env        # set ADMIN_TOKEN and MODEL_SETTINGS_SECRET
+docker compose up -d        # db + kanban on http://localhost:8787
+```
+
 Install the plugin on each machine running pi:
 
 ```bash
@@ -86,15 +97,11 @@ config file. `PI_KANBAN_URL` remains available as an environment override.
 
 ## Migrating an existing database
 
-The multi-user migration intentionally deletes existing session history because
-those rows have no trustworthy owner. Back up anything you need first, then run:
-
-```bash
-psql "$DATABASE_URL" -f apps/server/drizzle/0000_multi_user.sql
-pnpm db:push
-```
-
-New installations only need `pnpm db:push`. Existing multi-user installations can apply `apps/server/drizzle/0001_project_memory.sql` directly or run `pnpm db:push`.
+At startup the server applies `apps/server/drizzle/*.sql` in filename order,
+tracked in a `_migrations` ledger (files are generated with `drizzle-kit
+generate`; regenerate instead of hand-editing after `schema.ts` changes). A
+database previously created with `pnpm db:push` is detected via its existing
+tables and baselined without replaying — `pnpm db:push` keeps working for dev.
 
 Full model inspections have a 180-second request budget; connection tests use 30 seconds. Requests are not automatically retried. Inspection input is bounded to 400 KB before redaction, using whole records and a structure tree rather than the raw file manifest; omission counts describe records removed by that byte budget (database queries also have row caps). Generation is capped at 8,192 tokens and requests up to 40 concise insights. A failed scheduled inspection becomes due again after the configured interval. Saving unchanged settings does not restart every project, and disabling the scheduler does not cancel or unlock an in-flight inspection.
 

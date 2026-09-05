@@ -1,3 +1,7 @@
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { and, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
@@ -69,6 +73,9 @@ import {
 
 type AppEnv = { Variables: { auth: AuthUser } };
 export const api = new Hono<AppEnv>();
+
+// Liveness probe for containers/orchestrators; deliberately DB-free.
+api.get("/health", (c) => c.json({ ok: true }));
 
 const ACTIVE_STATES = ["running", "waiting_approval", "idle", "offline"];
 
@@ -806,4 +813,25 @@ function extractTotalTokens(usage: unknown): number | undefined {
 	const value = usage as Record<string, unknown>;
 	const parts = [value.input, value.output, value.cacheRead, value.cacheWrite].filter((part): part is number => typeof part === "number" && Number.isFinite(part));
 	return parts.length > 0 ? parts.reduce((sum, part) => sum + part, 0) : undefined;
+}
+
+// Production image only: serve the built SPA from apps/web/dist so one port
+// serves UI, API, and WS. In dev the directory is absent and vite serves the
+// UI itself. serveStatic resolves paths against process.cwd(), so rebase the
+// root from this file's location.
+const webDistDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../web/dist");
+if (existsSync(webDistDir)) {
+	const webRoot = path.relative(process.cwd(), webDistDir);
+	// Unmatched /api and /agent requests must stay JSON 404s instead of
+	// falling through to the SPA shell below.
+	api.use("*", async (c, next) => {
+		const p = c.req.path;
+		if (p === "/api" || p.startsWith("/api/") || p === "/agent" || p.startsWith("/agent/")) {
+			return c.json({ error: "not found" }, 404);
+		}
+		await next();
+	});
+	api.use("*", serveStatic({ root: webRoot }));
+	// BrowserRouter client routes: anything still unmatched gets the shell.
+	api.get("*", serveStatic({ path: path.join(webRoot, "index.html") }));
 }

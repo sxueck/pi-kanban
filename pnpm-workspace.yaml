@@ -1,3 +1,11 @@
 packages:
   - "packages/*"
   - "apps/*"
+
+# pnpm>=10 blocks dependency build scripts unless allowlisted (esbuild's
+# postinstall validates its platform binary; the plugin's genai/protobufjs
+# postinstalls are pure-JS and safe).
+allowBuilds:
+  esbuild: true
+  "@google/genai": true
+  protobufjs: true
