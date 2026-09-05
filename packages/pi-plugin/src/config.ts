@@ -4,11 +4,12 @@ import { homedir, hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import type { PluginConfig } from "@pi-kanban/shared";
 
-const AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
-const CONFIG_PATH = join(AGENT_DIR, "pi-kanban.json");
-const MACHINE_ID_PATH = join(AGENT_DIR, "pi-kanban-machine-id");
-
 export const PLUGIN_VERSION = "0.1.0";
+
+/** Resolved lazily so tests (and tools) can point the plugin at a scratch dir. */
+function agentDir(): string {
+	return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+}
 
 /** Defaults mirror the user's local workflow-guard patterns plus cloud-remote risks. */
 const DEFAULT_RULES = [
@@ -23,7 +24,7 @@ const DEFAULT_RULES = [
 function defaultConfig(): PluginConfig {
 	return {
 		server: {
-			url: process.env.PI_KANBAN_URL ?? "ws://localhost:8787/agent",
+			url: "ws://localhost:8787/agent",
 		},
 		gate: {
 			rules: DEFAULT_RULES,
@@ -39,25 +40,48 @@ function defaultConfig(): PluginConfig {
 	};
 }
 
+/**
+ * Accepts a base URL (`https://host[:port]`, `host:port`) or a full ws
+ * endpoint (`ws://host/agent`); upgrades http(s) to ws(s) and appends the
+ * `/agent` endpoint when no path was given.
+ */
+export function normalizeServerUrl(raw: string): string {
+	const value = raw.trim();
+	try {
+		const url = new URL(value.includes("://") ? value : `ws://${value}`);
+		if (url.protocol === "http:") url.protocol = "ws:";
+		else if (url.protocol === "https:") url.protocol = "wss:";
+		if (url.pathname === "" || url.pathname === "/") url.pathname = "/agent";
+		return url.toString();
+	} catch {
+		return value;
+	}
+}
+
 export function loadConfig(): PluginConfig {
+	const configPath = join(agentDir(), "pi-kanban.json");
 	const config = defaultConfig();
-	if (existsSync(CONFIG_PATH)) {
+	if (existsSync(configPath)) {
 		try {
-			const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as Partial<PluginConfig>;
+			const raw = JSON.parse(readFileSync(configPath, "utf8")) as Partial<PluginConfig>;
 			if (raw.server) {
 				// Migration: tokens were once kept in the config file; they are env-only now.
 				if ("agentToken" in raw.server) {
 					delete (raw.server as { agentToken?: unknown }).agentToken;
-					console.error(`[pi-kanban] server.agentToken in ${CONFIG_PATH} is ignored — set the PI_KANBAN_TOKEN environment variable instead`);
+					console.error(`[pi-kanban] server.agentToken in ${configPath} is ignored — set the PI_KANBAN_TOKEN environment variable instead`);
 				}
 				Object.assign(config.server, raw.server);
 			}
 			if (raw.gate) Object.assign(config.gate, raw.gate);
 			if (raw.report) Object.assign(config.report, raw.report);
 		} catch (error) {
-			console.error(`[pi-kanban] invalid config at ${CONFIG_PATH}:`, error);
+			console.error(`[pi-kanban] invalid config at ${configPath}:`, error);
 		}
 	}
+	// Env wins over the config file — documented as an environment override.
+	const envUrl = process.env.PI_KANBAN_URL?.trim();
+	if (envUrl) config.server.url = envUrl;
+	config.server.url = normalizeServerUrl(config.server.url);
 	return config;
 }
 
@@ -68,14 +92,15 @@ export function agentToken(): string {
 
 /** Stable per-machine identity (survives reinstalls, unique per device). */
 export function machineId(): string {
+	const machineIdPath = join(agentDir(), "pi-kanban-machine-id");
 	try {
-		if (existsSync(MACHINE_ID_PATH)) {
-			const id = readFileSync(MACHINE_ID_PATH, "utf8").trim();
+		if (existsSync(machineIdPath)) {
+			const id = readFileSync(machineIdPath, "utf8").trim();
 			if (id) return id;
 		}
 		const id = randomUUID();
-		mkdirSync(AGENT_DIR, { recursive: true });
-		writeFileSync(MACHINE_ID_PATH, id);
+		mkdirSync(agentDir(), { recursive: true });
+		writeFileSync(machineIdPath, id);
 		return id;
 	} catch {
 		return `unknown-${hostname()}`;

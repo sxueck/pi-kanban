@@ -93,7 +93,9 @@ pnpm plugin:build && pnpm plugin:install
 
 `PI_KANBAN_TOKEN` is the per-user machine Agent Token, read from the
 environment (e.g. exported in `~/.zshrc`) — it is never stored in the plugin
-config file. `PI_KANBAN_URL` remains available as an environment override.
+config file. `PI_KANBAN_URL` overrides the plugin's upload target (a base URL
+like `https://kanban.example.com` is enough; see
+`packages/pi-plugin/README.md`).
 
 ## Migrating an existing database
 
