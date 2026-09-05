@@ -137,6 +137,14 @@ export function useResource<T>(path: string | null, refreshKey = 0): {
 
 // --- formatting helpers ---------------------------------------------------------
 
+/** cacheRead / (fresh input + cacheRead); undefined until the plugin reports usage. */
+export function cacheHitRate(s: { cacheReadTokens?: number; inputTokens?: number }): number | undefined {
+	const cacheRead = s.cacheReadTokens ?? 0;
+	const input = s.inputTokens ?? 0;
+	if (cacheRead + input <= 0) return undefined;
+	return cacheRead / (cacheRead + input);
+}
+
 export function fmtCost(usd: number): string {
 	return usd >= 1 ? `$${usd.toFixed(2)}` : `$${usd.toFixed(3)}`;
 }

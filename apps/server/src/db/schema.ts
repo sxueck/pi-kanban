@@ -1,4 +1,5 @@
 import {
+	bigint,
 	boolean,
 	doublePrecision,
 	index,
@@ -96,6 +97,13 @@ export const sessions = pgTable(
 		modelId: text("model_id"),
 		totalCostUsd: doublePrecision("total_cost_usd").notNull().default(0),
 		turnCount: integer("turn_count").notNull().default(0),
+		// Token aggregates, fed from pi assistant-message usage blocks.
+		inputTokens: bigint("input_tokens", { mode: "number" }).notNull().default(0),
+		cacheReadTokens: bigint("cache_read_tokens", { mode: "number" }).notNull().default(0),
+		totalTokens: bigint("total_tokens", { mode: "number" }).notNull().default(0),
+		// Latest observed context size vs the model's window (0 = unreported).
+		contextTokens: integer("context_tokens").notNull().default(0),
+		contextWindow: integer("context_window").notNull().default(0),
 		startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
 		lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
 		lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }).notNull().defaultNow(),
@@ -121,6 +129,7 @@ export const turns = pgTable(
 		state: text("state").notNull().default("running"), // running | done
 		startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
 		endedAt: timestamp("ended_at", { withTimezone: true }),
+		ttftMs: integer("ttft_ms"),
 	},
 	(t) => [unique("uq_turns_session_position").on(t.sessionId, t.position)],
 );

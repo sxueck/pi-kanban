@@ -27,6 +27,7 @@ export function mergeTurns(rows: Array<typeof turns.$inferSelect>): TurnDTO[] {
 			state: t.state as "running" | "done",
 			startedAt: t.startedAt.getTime(),
 			endedAt: t.endedAt?.getTime(),
+			ttftMs: t.ttftMs ?? undefined,
 			steps: 1,
 		});
 	}
