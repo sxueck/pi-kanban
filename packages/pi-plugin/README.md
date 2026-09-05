@@ -43,7 +43,12 @@ Each pi user must create their own Agent Token in the dashboard **Account** page
 and export it as `PI_KANBAN_TOKEN` on their own machines. That token binds
 reported sessions to the user; it replaces the old server-wide `AGENT_TOKEN`.
 
-`PI_KANBAN_URL` remains available as an environment override for the server URL.
+`PI_KANBAN_URL` is the environment override for the server URL — it wins over
+`server.url` in the config file. A base URL is enough: `http(s)://` is upgraded
+to `ws(s)://` and a missing path gets the `/agent` endpoint appended, so all of
+`https://kanban.example.com`, `kanban.example.com:8787`, and
+`wss://kanban.example.com/agent` point at the same upload target (an explicit
+path such as `/kanban/agent` behind a reverse proxy is kept as-is).
 
 ## Behavior
 
