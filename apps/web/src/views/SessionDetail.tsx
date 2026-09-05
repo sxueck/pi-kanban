@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import type { MessageDTO, SessionDetailDTO, ToolCallDTO, TurnDTO } from "@pi-kanban/shared";
-import { fmtCost, fmtElapsed, fmtTime, useResource } from "../api.js";
+import { cacheHitRate, fmtCost, fmtElapsed, fmtTime, useResource } from "../api.js";
 import { useI18n } from "../i18n.js";
 import type { MsgKey } from "../i18n.js";
 import { StateIcon } from "../components/icons.js";
@@ -17,30 +17,29 @@ export function SessionDetail() {
 	if (!data) return null;
 	const s = data;
 	const pendingCount = s.approvals.filter((a) => a.status === "pending").length;
-	const totalTokens = s.totalTokens ?? 0;
 
 	return (
 		<div className="session-detail">
-			<header className="detail-head">
-				<Link to="/" className="back">
-					← {t("nav.board")}
-				</Link>
-				<div className="project">
-					{s.projectName}
-					{s.branch && <span className="branch">{s.branch}</span>}
-					<span className={`state state-${s.state}`}>{t(`state.${s.state}` as MsgKey)}</span>
-				</div>
-				<h2>{s.title ?? s.id}</h2>
-				<div className="card-meta">
-					<span>{t("detail.started", { time: fmtTime(s.startedAt) })}</span>
-					<span>{t("detail.active", { elapsed: fmtElapsed(s.startedAt, s.lastActivityAt) })}</span>
-					<span>{t("detail.turns", { n: s.turns.length })}</span>
-					<span>{fmtCost(s.totalCostUsd)}</span>
-					{totalTokens > 0 && <span>{fmtTokens(totalTokens)} tokens</span>}
-					{s.modelId && <span className="mono">{s.modelId}</span>}
-					<span className="mono muted">{s.cwd}</span>
-				</div>
-			</header>
+			<div className="detail-main">
+				<header className="detail-head">
+					<Link to="/" className="back">
+						← {t("nav.board")}
+					</Link>
+					<div className="project">
+						{s.projectName}
+						{s.branch && <span className="branch">{s.branch}</span>}
+						<span className={`state state-${s.state}`}>{t(`state.${s.state}` as MsgKey)}</span>
+					</div>
+					<h2>{s.title ?? s.id}</h2>
+					<div className="card-meta">
+						<span>{t("detail.started", { time: fmtTime(s.startedAt) })}</span>
+						<span>{t("detail.active", { elapsed: fmtElapsed(s.startedAt, s.lastActivityAt) })}</span>
+						<span>{t("detail.turns", { n: s.turns.length })}</span>
+						<span>{fmtCost(s.totalCostUsd)}</span>
+						{s.modelId && <span className="mono">{s.modelId}</span>}
+						<CacheMetric session={s} />
+					</div>
+				</header>
 
 			{pendingCount > 0 && (
 				<section className="approval-banner">
@@ -90,9 +89,10 @@ export function SessionDetail() {
 				</section>
 			)}
 
-			<section className="trace-section">
-				<TraceView session={s} />
-			</section>
+				<section className="trace-section">
+					<TraceView session={s} />
+				</section>
+			</div>
 		</div>
 	);
 }
@@ -586,6 +586,17 @@ function onelineJson(input: unknown): string {
 	} catch {
 		return String(input);
 	}
+}
+
+function CacheMetric({ session }: { session: SessionDetailDTO }) {
+	const { t } = useI18n();
+	const rate = cacheHitRate(session);
+	if (rate == null) return null;
+	return (
+		<span className="metric" title={t("metrics.cacheHint")}>
+			{t("metrics.cacheRate", { pct: Math.round(rate * 100) })}
+		</span>
+	);
 }
 
 function fmtTokens(n: number): string {

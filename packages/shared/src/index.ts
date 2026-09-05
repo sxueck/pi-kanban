@@ -59,6 +59,8 @@ export interface TurnEndMessage {
 	sessionId: string;
 	position: number;
 	endedAt: number;
+	/** Prompt-submitted → first assistant token (pi message_start), ms. */
+	ttftMs?: number;
 }
 
 export interface MessageReportMessage {
@@ -74,6 +76,8 @@ export interface MessageReportMessage {
 	usage?: unknown;
 	costUsd?: number;
 	modelId?: string;
+	/** pi ctx.model.contextWindow, sent alongside usage so the server can rate context fill. */
+	contextWindow?: number;
 	timestamp: number;
 }
 
@@ -232,6 +236,16 @@ export interface BoardSession {
 	startedAt: number;
 	lastActivityAt: number;
 	pendingApprovals: number;
+	/** Cumulative fresh (uncached) input tokens across the session. */
+	inputTokens?: number;
+	/** Cumulative tokens served from the provider prompt cache. */
+	cacheReadTokens?: number;
+	/** Cumulative input+output+cache tokens across the session. */
+	totalTokens?: number;
+	/** Context size reported by the most recent assistant message. */
+	contextTokens?: number;
+	/** Model context window; 0/undefined when the plugin/model did not report one. */
+	contextWindow?: number;
 	todo?: TodoProgress;
 	lastMessage?: {
 		role: string;
@@ -288,6 +302,21 @@ export interface RecentSessionDTO {
 	lastActivityAt: number;
 }
 
+/** One bucket of the daily activity series; `day` is YYYY-MM-DD (UTC). */
+export interface DailyStatDTO {
+	day: string;
+	sessionCount: number;
+	turnCount: number;
+	totalCostUsd: number;
+	totalTokens: number;
+}
+
+/** Lifetime aggregates across every session of the account, finished ones included. */
+export interface LifetimeStatDTO {
+	totalCostUsd: number;
+	totalTokens: number;
+}
+
 export interface HistorySessionDTO {
 	id: string;
 	title?: string;
@@ -307,6 +336,8 @@ export interface TurnDTO {
 	state: "running" | "done";
 	startedAt: number;
 	endedAt?: number;
+	/** Prompt-submitted → first assistant token, ms. */
+	ttftMs?: number;
 	/**
 	 * Internal model steps merged into this logical turn. Legacy plugins sent
 	 * one turn per agent-loop step (all sharing the prompt); the server

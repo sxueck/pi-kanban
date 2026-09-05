@@ -4,7 +4,9 @@ import { and, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import type {
 	ApprovalDTO,
 	BoardSession,
+	DailyStatDTO,
 	HistorySessionDTO,
+	LifetimeStatDTO,
 	ProjectHistoryDTO,
 	RecentSessionDTO,
 	SessionDetailDTO,
@@ -232,6 +234,11 @@ api.get("/api/board", async (c) => {
 			modelId: sessions.modelId,
 			totalCostUsd: sessions.totalCostUsd,
 			turnCount: sessions.turnCount,
+			inputTokens: sessions.inputTokens,
+			cacheReadTokens: sessions.cacheReadTokens,
+			totalTokens: sessions.totalTokens,
+			contextTokens: sessions.contextTokens,
+			contextWindow: sessions.contextWindow,
 			startedAt: sessions.startedAt,
 			lastActivityAt: sessions.lastActivityAt,
 		})
@@ -240,6 +247,41 @@ api.get("/api/board", async (c) => {
 		.where(boardSessionFilter(currentUser(c).id))
 		.orderBy(desc(sessions.lastActivityAt));
 	return c.json(await toBoardSessions(rows));
+});
+
+api.get("/api/stats/daily", async (c) => {
+	const daysParam = Number(c.req.query("days") ?? "14");
+	// 200 days covers a ~28-week contribution heatmap.
+	const days = Number.isInteger(daysParam) ? Math.min(Math.max(daysParam, 1), 200) : 14;
+	const rows = await db
+		.select({
+			day: sql<string>`to_char(date_trunc('day', ${sessions.startedAt}), 'YYYY-MM-DD')`,
+			sessionCount: sql<number>`count(${sessions.id})::int`,
+			turnCount: sql<number>`coalesce(sum(${sessions.turnCount}), 0)::int`,
+			totalCostUsd: sql<number>`coalesce(sum(${sessions.totalCostUsd}), 0)::float8`,
+			totalTokens: sql<number>`coalesce(sum(${sessions.totalTokens}), 0)::float8`,
+		})
+		.from(sessions)
+		.where(
+			and(
+				eq(sessions.userId, currentUser(c).id),
+				sql`${sessions.startedAt} >= now() - make_interval(days => ${days})`,
+			),
+		)
+		.groupBy(sql`date_trunc('day', ${sessions.startedAt})`)
+		.orderBy(sql`date_trunc('day', ${sessions.startedAt})`);
+	return c.json(rows satisfies DailyStatDTO[]);
+});
+
+api.get("/api/stats/total", async (c) => {
+	const [row] = await db
+		.select({
+			totalCostUsd: sql<number>`coalesce(sum(${sessions.totalCostUsd}), 0)::float8`,
+			totalTokens: sql<number>`coalesce(sum(${sessions.totalTokens}), 0)::float8`,
+		})
+		.from(sessions)
+		.where(eq(sessions.userId, currentUser(c).id));
+	return c.json(row satisfies LifetimeStatDTO);
 });
 
 api.get("/api/sessions/recent", async (c) => {
@@ -282,6 +324,11 @@ async function toBoardSessions(
 		modelId: string | null;
 		totalCostUsd: number;
 		turnCount: number;
+		inputTokens: number;
+		cacheReadTokens: number;
+		totalTokens: number;
+		contextTokens: number;
+		contextWindow: number;
 		startedAt: Date;
 		lastActivityAt: Date;
 	}>,
@@ -320,6 +367,11 @@ async function toBoardSessions(
 			modelId: row.modelId ?? undefined,
 			totalCostUsd: row.totalCostUsd,
 			turnCount: row.turnCount,
+			inputTokens: row.inputTokens,
+			cacheReadTokens: row.cacheReadTokens,
+			totalTokens: row.totalTokens,
+			contextTokens: row.contextTokens,
+			contextWindow: row.contextWindow,
 			startedAt: row.startedAt.getTime(),
 			lastActivityAt: row.lastActivityAt.getTime(),
 			pendingApprovals: pendingBySession.get(row.id) ?? 0,
@@ -491,7 +543,13 @@ api.get("/api/sessions/:id", async (c) => {
 		lastActivityAt: session.lastActivityAt.getTime(),
 		pendingApprovals: approvalRows.filter((approval) => approval.status === "pending").length,
 		lastMessage: undefined,
-		totalTokens,
+		inputTokens: session.inputTokens,
+		cacheReadTokens: session.cacheReadTokens,
+		contextTokens: session.contextTokens,
+		contextWindow: session.contextWindow,
+		// Aggregated columns cover pre-detail-cap history; fall back to the
+		// message sum for rows written before token aggregation existed.
+		totalTokens: session.totalTokens > 0 ? session.totalTokens : totalTokens,
 		turns: logicalTurns,
 		messages: messageRows.map((message) => ({
 			position: message.position,

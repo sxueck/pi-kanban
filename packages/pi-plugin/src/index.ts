@@ -28,6 +28,8 @@ export default function (pi: ExtensionAPI): void {
 	const turns = new TurnState();
 	let lastPrompt = "";
 	let lastTodoHash = "";
+	let turnStartedAt = 0;
+	let turnTtftMs: number | undefined;
 	const toolStartTimes = new Map<string, number>();
 
 	const gate: GateDeps = {
@@ -89,6 +91,8 @@ export default function (pi: ExtensionAPI): void {
 
 	pi.on("before_agent_start", async (event) => {
 		lastPrompt = event.prompt;
+		turnStartedAt = Date.now();
+		turnTtftMs = undefined;
 		if (!sessionId) return;
 		const position = turns.start();
 		transport.send({
@@ -108,8 +112,17 @@ export default function (pi: ExtensionAPI): void {
 			sessionId,
 			position,
 			endedAt: Date.now(),
+			ttftMs: turnTtftMs,
 		});
 		await reportTodoSnapshot(ctx);
+	});
+
+	// TTFT: prompt submitted (before_agent_start) → first assistant message
+	// starts streaming. Only the first assistant message of a turn counts.
+	pi.on("message_start", async (event) => {
+		if (turnTtftMs != null || !turnStartedAt) return;
+		const message = event.message as { role?: string };
+		if (message.role === "assistant") turnTtftMs = Date.now() - turnStartedAt;
 	});
 
 	// --- message stream ------------------------------------------------------------
@@ -132,6 +145,7 @@ export default function (pi: ExtensionAPI): void {
 			usage: message.usage,
 			costUsd: extractCost(message.usage),
 			modelId: modelId(ctx),
+			contextWindow: contextWindow(ctx),
 			timestamp: Date.now(),
 		});
 	});
@@ -257,6 +271,11 @@ function modelId(ctx: { model?: { provider?: string; id?: string } }): string | 
 	const model = ctx.model;
 	if (!model?.id) return undefined;
 	return model.provider ? `${model.provider}/${model.id}` : model.id;
+}
+
+function contextWindow(ctx: { model?: { contextWindow?: unknown } }): number | undefined {
+	const window = ctx.model?.contextWindow;
+	return typeof window === "number" && Number.isFinite(window) && window > 0 ? window : undefined;
 }
 
 function gitInfo(cwd: string): Promise<[string | undefined, string | undefined]> {

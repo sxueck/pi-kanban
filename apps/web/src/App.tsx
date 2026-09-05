@@ -1,13 +1,16 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, Route, Routes, useLocation } from "react-router-dom";
 import { apiGetPublic, apiPost, apiPostPublic, clearToken, getToken, setToken, UNAUTHORIZED_EVENT } from "./api.js";
 import { useI18n } from "./i18n.js";
+import { notifyNewApprovals } from "./settings.js";
 import { GateIllustration, NotFoundIllustration } from "./components/illustrations.js";
+import { NavIcon, type NavIconName } from "./components/icons.js";
 import { Account } from "./views/Account.js";
 import { Board } from "./views/Board.js";
 import { Approvals } from "./views/Approvals.js";
 import { History, ProjectSessions } from "./views/History.js";
 import { SessionDetail } from "./views/SessionDetail.js";
+import { Settings } from "./views/Settings.js";
 
 interface AuthResponse {
 	token: string;
@@ -36,6 +39,7 @@ export function App() {
 					<Route path="/history/project/:id" element={<ProjectSessions />} />
 					<Route path="/sessions/:id" element={<SessionDetail />} />
 					<Route path="/account" element={<Account />} />
+					<Route path="/settings" element={<Settings />} />
 					<Route path="*" element={<NotFound />} />
 				</Routes>
 			</main>
@@ -104,11 +108,10 @@ function Nav() {
 	const { t, locale, setLocale } = useI18n();
 	const { pathname } = useLocation();
 	const pendingBadge = usePendingCount();
-	const links: Array<[string, string]> = [
-		["/", t("nav.board")],
-		["/approvals", t("nav.approvals")],
-		["/history", t("nav.history")],
-		["/account", t("nav.account")],
+	useApprovalNotifications(pendingBadge);
+	const groups: Array<[string, Array<[string, string, NavIconName]>]> = [
+		[t("nav.group.general"), [["/", t("nav.board"), "board"], ["/approvals", t("nav.approvals"), "approvals"], ["/history", t("nav.history"), "history"]]],
+		[t("nav.group.system"), [["/account", t("nav.account"), "account"], ["/settings", t("nav.settings"), "settings"]]],
 	];
 	const nextLocale = locale === "zh" ? "en" : "zh";
 	return (
@@ -117,11 +120,22 @@ function Nav() {
 				<span className="brand-icon">π</span>
 				<span className="nav-label">pi-kanban</span>
 			</div>
-			{links.map(([to, label]) => (
-				<Link key={to} to={to} className={pathname === to ? "active" : ""}>
-					<span className="nav-label">{label}</span>
-					{to === "/approvals" && pendingBadge > 0 && <span className="badge">{pendingBadge}</span>}
-				</Link>
+			{groups.map(([label, links]) => (
+				<div key={label} className="nav-group">
+					<div className="nav-group-label">{label}</div>
+					{links.map(([to, linkLabel, icon]) => {
+						// Keep the nav item highlighted on child routes (e.g. /history/project/:id);
+						// "/" must stay exact-match or it would highlight everywhere.
+						const active = to === "/" ? pathname === to : pathname === to || pathname.startsWith(`${to}/`);
+						return (
+							<Link key={to} to={to} className={active ? "active" : ""}>
+								<NavIcon name={icon} />
+								<span className="nav-label">{linkLabel}</span>
+								{to === "/approvals" && pendingBadge > 0 && <span className="badge">{pendingBadge}</span>}
+							</Link>
+						);
+					})}
+				</div>
 			))}
 			<div className="nav-footer">
 				<button type="button" className="lang-switch" onClick={() => setLocale(nextLocale)} aria-label={t("nav.switchLanguage")} aria-pressed={locale === "zh"}>
@@ -129,6 +143,7 @@ function Nav() {
 					<span className="nav-label">{locale === "zh" ? "中文" : "English"}</span>
 				</button>
 				<button type="button" onClick={() => void logout()}>
+					<NavIcon name="logout" />
 					<span className="nav-label">{t("nav.logout")}</span>
 				</button>
 			</div>
@@ -167,6 +182,17 @@ function usePendingCount(): number {
 		};
 	}, []);
 	return count;
+}
+
+function useApprovalNotifications(pending: number): void {
+	const { t, locale } = useI18n();
+	const previous = useRef(pending);
+	useEffect(() => {
+		if (pending > previous.current) {
+			notifyNewApprovals(t("notify.newApprovals", { n: pending }));
+		}
+		previous.current = pending;
+	}, [pending, t, locale]);
 }
 
 function NotFound() {

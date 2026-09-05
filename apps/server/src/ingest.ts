@@ -239,7 +239,11 @@ async function onTurnStart(
 async function onTurnEnd(msg: Extract<UpstreamMessage, { type: "turn_end" }>) {
 	await db
 		.update(turns)
-		.set({ state: "done", endedAt: new Date(msg.endedAt) })
+		.set({
+			state: "done",
+			endedAt: new Date(msg.endedAt),
+			...(msg.ttftMs != null ? { ttftMs: msg.ttftMs } : {}),
+		})
 		.where(
 			and(eq(turns.sessionId, msg.sessionId), eq(turns.position, msg.position)),
 		);
@@ -271,6 +275,15 @@ async function onMessage(msg: Extract<UpstreamMessage, { type: "message" }>) {
 			updates.totalCostUsd = sql`${sessions.totalCostUsd} + ${msg.costUsd}`;
 		}
 		if (msg.modelId) updates.modelId = msg.modelId;
+		const usage = parseUsage(msg.usage);
+		if (usage) {
+			updates.inputTokens = sql`${sessions.inputTokens} + ${usage.input}`;
+			updates.cacheReadTokens = sql`${sessions.cacheReadTokens} + ${usage.cacheRead}`;
+			updates.totalTokens = sql`${sessions.totalTokens} + ${usage.total}`;
+			// A completion's totalTokens approximates the context it was given.
+			updates.contextTokens = usage.total;
+		}
+		if (msg.contextWindow != null) updates.contextWindow = msg.contextWindow;
 	}
 	await db.update(sessions).set(updates).where(eq(sessions.id, msg.sessionId));
 	publish({ type: "session_update", sessionId: msg.sessionId });
@@ -466,4 +479,27 @@ export async function recomputeSessionState(
 		.set(updates)
 		.where(eq(sessions.id, sessionId));
 	return changed;
+}
+
+interface UsageParts {
+	input: number;
+	cacheRead: number;
+	total: number;
+}
+
+/** Tolerant read of pi's assistant usage block; shape may drift across pi versions. */
+function parseUsage(usage: unknown): UsageParts | undefined {
+	if (!usage || typeof usage !== "object") return undefined;
+	const value = usage as Record<string, unknown>;
+	const num = (key: string): number => {
+		const part = value[key];
+		return typeof part === "number" && Number.isFinite(part) ? part : 0;
+	};
+	const input = num("input");
+	const output = num("output");
+	const cacheRead = num("cacheRead");
+	const cacheWrite = num("cacheWrite");
+	const total = num("totalTokens") || input + output + cacheRead + cacheWrite;
+	if (total <= 0) return undefined;
+	return { input, cacheRead, total };
 }
