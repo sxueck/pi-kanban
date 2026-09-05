@@ -11,9 +11,10 @@ export const APPROVAL_TTL_MS = Number(process.env.APPROVAL_TTL_MS ?? 30 * 60_000
 export async function decideApproval(
 	id: string,
 	decision: "approved" | "denied",
-	decidedBy?: string,
-	note?: string,
-	sendToMachine: (machineId: string, msg: ApprovalDecisionMessage) => boolean = () => false,
+	decidedBy: string | undefined,
+	note: string | undefined,
+	userId: string,
+	sendToMachine: (userId: string, machineId: string, msg: ApprovalDecisionMessage) => boolean = () => false,
 ): Promise<{ ok: boolean; error?: string }> {
 	const [row] = await db
 		.update(approvals)
@@ -24,14 +25,14 @@ export async function decideApproval(
 
 	// Deliver to the blocked plugin; if disconnected, the plugin's own timeout
 	// policy applies (it will also see the decision on reconnect-free retry).
-	sendToMachine(row.machineId, {
+	sendToMachine(userId, row.machineId, {
 		type: "approval_decision",
 		approvalId: row.id,
 		decision,
 		decidedBy,
 		note,
 	});
-	await recomputeSessionState(row.sessionId);
+	await recomputeSessionState(row.sessionId, new Date());
 	publish({ type: "approval_update", approvalId: row.id, sessionId: row.sessionId });
 	return { ok: true };
 }
@@ -45,7 +46,7 @@ export async function sweepExpiredApprovals(): Promise<number> {
 		.where(and(eq(approvals.status, "pending"), lt(approvals.requestedAt, cutoff)))
 		.returning({ id: approvals.id, sessionId: approvals.sessionId });
 	for (const row of expired) {
-		await recomputeSessionState(row.sessionId);
+		await recomputeSessionState(row.sessionId, new Date());
 		publish({ type: "approval_update", approvalId: row.id, sessionId: row.sessionId });
 	}
 	return expired.length;

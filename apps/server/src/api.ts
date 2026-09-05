@@ -1,17 +1,19 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import type {
 	ApprovalDTO,
 	BoardSession,
 	HistorySessionDTO,
 	ProjectHistoryDTO,
+	RecentSessionDTO,
 	SessionDetailDTO,
 	SessionState,
 	TodoProgress,
 } from "@pi-kanban/shared";
 import { db } from "./db/index.js";
 import {
+	agentTokens,
 	approvals,
 	messages,
 	projects,
@@ -20,28 +22,201 @@ import {
 	todos,
 	toolCalls,
 	turns,
+	users,
 } from "./db/schema.js";
+import {
+	authenticateAgentToken,
+	authenticateWebToken,
+	createWebSession,
+	hashPassword,
+	hashToken,
+	isBootstrapToken,
+	newSecret,
+	revokeWebSession,
+	validatePassword,
+	validateUsername,
+	verifyPassword,
+	type AuthUser,
+} from "./auth.js";
 import { subscribe, type BusEvent } from "./bus.js";
+import { displayTurnPositions, mergeTurns } from "./merge-turns.js";
 import { decideApproval } from "./approvals.js";
+import { handleUpstream } from "./ingest.js";
 import { sendToMachine } from "./ws.js";
 import { connectionStats } from "./ws.js";
 
-export const api = new Hono();
+type AppEnv = { Variables: { auth: AuthUser } };
+export const api = new Hono<AppEnv>();
 
-// --- auth --------------------------------------------------------------------
+const ACTIVE_STATES = ["running", "waiting_approval", "idle", "offline"];
+
+/**
+ * A session enters board/recent listings only once its task started — the
+ * first prompt was submitted (turn_count > 0). A merely-opened pi session
+ * would otherwise surface as an untitled card.
+ */
+function startedFilter(userId: string) {
+	return and(eq(sessions.userId, userId), gt(sessions.turnCount, 0));
+}
+
+export function boardSessionFilter(userId: string) {
+	const filter = startedFilter(userId);
+	if (!filter) throw new Error("board filter requires a condition");
+	return and(filter, inArray(sessions.state, ACTIVE_STATES));
+}
+
+function bearerToken(header: string | undefined): string | undefined {
+	return header?.startsWith("Bearer ") ? header.slice(7) : undefined;
+}
+
+function currentUser(c: { get(key: "auth"): AuthUser }): AuthUser {
+	return c.get("auth");
+}
+
+function isAdmin(user: AuthUser): boolean {
+	return user.role === "admin";
+}
+
+api.post("/api/auth/bootstrap", async (c) => {
+	if (!process.env.ADMIN_TOKEN) return c.json({ error: "server misconfigured: ADMIN_TOKEN unset" }, 500);
+	if (!isBootstrapToken(bearerToken(c.req.header("authorization")))) {
+		return c.json({ error: "unauthorized" }, 401);
+	}
+	const existing = await db.select({ id: users.id }).from(users).limit(1);
+	if (existing.length > 0) return c.json({ error: "bootstrap already completed" }, 409);
+	const body = await c.req.json<{ username?: unknown; password?: unknown }>().catch(() => null);
+	if (!body || !validateUsername(body.username) || !validatePassword(body.password)) {
+		return c.json({ error: "username must be 3-40 characters; password must be at least 12 characters" }, 400);
+	}
+	const [user] = await db
+		.insert(users)
+		.values({ username: body.username, passwordHash: await hashPassword(body.password), role: "admin" })
+		.returning({ id: users.id, username: users.username, role: users.role });
+	const token = await createWebSession(user.id);
+	return c.json({ token, user });
+});
+
+api.get("/api/auth/status", async (c) => {
+	const existing = await db.select({ id: users.id }).from(users).limit(1);
+	return c.json({ setupRequired: existing.length === 0 });
+});
+
+api.post("/api/auth/login", async (c) => {
+	const body = await c.req.json<{ username?: unknown; password?: unknown }>().catch(() => null);
+	if (!body || typeof body.username !== "string" || typeof body.password !== "string") {
+		return c.json({ error: "invalid credentials" }, 401);
+	}
+	const [user] = await db
+		.select({ id: users.id, username: users.username, passwordHash: users.passwordHash, role: users.role })
+		.from(users)
+		.where(eq(users.username, body.username))
+		.limit(1);
+	if (!user || !isAdminOrMember(user.role) || !(await verifyPassword(body.password, user.passwordHash))) {
+		return c.json({ error: "invalid credentials" }, 401);
+	}
+	const token = await createWebSession(user.id);
+	return c.json({ token, user: { id: user.id, username: user.username, role: user.role } });
+});
 
 api.use("/api/*", async (c, next) => {
-	const expected = process.env.ADMIN_TOKEN;
-	if (!expected) return c.json({ error: "server misconfigured: ADMIN_TOKEN unset" }, 500);
-	const header = c.req.header("authorization");
-	const token = header?.startsWith("Bearer ") ? header.slice(7) : c.req.query("token");
-	if (token !== expected) return c.json({ error: "unauthorized" }, 401);
+	const token = bearerToken(c.req.header("authorization")) ?? (c.req.path === "/api/events" ? c.req.query("token") : undefined);
+	if (!token) return c.json({ error: "unauthorized" }, 401);
+	const user = await authenticateWebToken(token);
+	if (!user) return c.json({ error: "unauthorized" }, 401);
+	c.set("auth", user);
 	await next();
 });
 
-// --- board ---------------------------------------------------------------------
+api.get("/api/auth/me", (c) => c.json({ user: currentUser(c) }));
 
-const ACTIVE_STATES = ["running", "waiting_approval", "idle", "offline"];
+api.post("/api/auth/logout", async (c) => {
+	const token = bearerToken(c.req.header("authorization"));
+	if (token) await revokeWebSession(token);
+	return c.json({ ok: true });
+});
+
+api.get("/api/users", async (c) => {
+	if (!isAdmin(currentUser(c))) return c.json({ error: "forbidden" }, 403);
+	const rows = await db
+		.select({ id: users.id, username: users.username, role: users.role, createdAt: users.createdAt })
+		.from(users)
+		.orderBy(users.createdAt);
+	return c.json(rows.map((row) => ({ ...row, createdAt: row.createdAt.getTime() })));
+});
+
+api.post("/api/users", async (c) => {
+	if (!isAdmin(currentUser(c))) return c.json({ error: "forbidden" }, 403);
+	const body = await c.req.json<{ username?: unknown; password?: unknown; role?: unknown }>().catch(() => null);
+	if (!body || !validateUsername(body.username) || !validatePassword(body.password)) {
+		return c.json({ error: "username must be 3-40 characters; password must be at least 12 characters" }, 400);
+	}
+	const role = body.role === "admin" ? "admin" : "member";
+	try {
+		const [user] = await db
+			.insert(users)
+			.values({ username: body.username, passwordHash: await hashPassword(body.password), role })
+			.returning({ id: users.id, username: users.username, role: users.role });
+		return c.json({ user }, 201);
+	} catch (error) {
+		if (isUniqueViolation(error)) return c.json({ error: "username already exists" }, 409);
+		throw error;
+	}
+});
+
+api.get("/api/agent-tokens", async (c) => {
+	const rows = await db
+		.select({ id: agentTokens.id, name: agentTokens.name, createdAt: agentTokens.createdAt, lastUsedAt: agentTokens.lastUsedAt })
+		.from(agentTokens)
+		.where(and(eq(agentTokens.userId, currentUser(c).id), isNull(agentTokens.revokedAt)))
+		.orderBy(desc(agentTokens.createdAt));
+	return c.json(rows.map((row) => ({ ...row, createdAt: row.createdAt.getTime(), lastUsedAt: row.lastUsedAt?.getTime() })));
+});
+
+api.post("/api/agent-tokens", async (c) => {
+	const body = await c.req.json<{ name?: unknown }>().catch(() => null);
+	const name = typeof body?.name === "string" ? body.name.trim() : "";
+	if (!name || name.length > 80) return c.json({ error: "token name must be 1-80 characters" }, 400);
+	const token = newSecret();
+	const [created] = await db
+		.insert(agentTokens)
+		.values({ userId: currentUser(c).id, name, tokenHash: hashToken(token) })
+		.returning({ id: agentTokens.id, name: agentTokens.name, createdAt: agentTokens.createdAt });
+	return c.json({ token, ...created, createdAt: created.createdAt.getTime() }, 201);
+});
+
+api.delete("/api/agent-tokens/:id", async (c) => {
+	const [revoked] = await db
+		.update(agentTokens)
+		.set({ revokedAt: new Date() })
+		.where(and(eq(agentTokens.id, c.req.param("id")), eq(agentTokens.userId, currentUser(c).id), isNull(agentTokens.revokedAt)))
+		.returning({ id: agentTokens.id });
+	return revoked ? c.body(null, 204) : c.json({ error: "token not found" }, 404);
+});
+
+// Stateless HTTP heartbeat: keeps sessions alive even while the WebSocket is
+// down; see the plugin transport. Lives outside /api/* on purpose — the /api/*
+// middleware below authenticates web-session tokens only.
+api.post("/agent/heartbeat", async (c) => {
+	const agent = await authenticateAgentToken(bearerToken(c.req.header("authorization")) ?? "");
+	if (!agent) return c.json({ error: "unauthorized" }, 401);
+	const body = await c.req
+		.json<{ machineId?: unknown; sessionIds?: unknown }>()
+		.catch(() => null);
+	if (
+		!body ||
+		typeof body.machineId !== "string" ||
+		!body.machineId ||
+		!Array.isArray(body.sessionIds) ||
+		!body.sessionIds.every((s) => typeof s === "string")
+	) {
+		return c.json({ error: "body must be {machineId: string, sessionIds: string[]}" }, 400);
+	}
+	await handleUpstream(
+		{ type: "heartbeat", sessionIds: body.sessionIds, timestamp: Date.now() },
+		{ machineId: body.machineId, userId: agent.userId },
+	);
+	return c.json({ ok: true, serverTime: Date.now() });
+});
 
 api.get("/api/board", async (c) => {
 	const rows = await db
@@ -62,56 +237,97 @@ api.get("/api/board", async (c) => {
 		})
 		.from(sessions)
 		.leftJoin(projects, eq(sessions.projectId, projects.id))
-		.where(inArray(sessions.state, ACTIVE_STATES))
+		.where(boardSessionFilter(currentUser(c).id))
 		.orderBy(desc(sessions.lastActivityAt));
-	if (rows.length === 0) return c.json([] satisfies BoardSession[]);
-
-	const ids = rows.map((r) => r.id);
-
-	const pending = await db
-		.select({ sessionId: approvals.sessionId, count: sql<number>`count(*)::int` })
-		.from(approvals)
-		.where(and(inArray(approvals.sessionId, ids), eq(approvals.status, "pending")))
-		.groupBy(approvals.sessionId);
-	const pendingBySession = new Map(pending.map((p) => [p.sessionId, p.count]));
-
-	const todoProgress = await activeTodoProgress(ids);
-
-	// SAFETY: drizzle's execute() types don't parametrize the row shape;
-	// this raw lateral query always returns { session_id, role, excerpt }.
-	const lastMessages = (await db.execute(sql`
-		select m.session_id, m.role, m.excerpt, m.position
-		from messages m
-		join (
-			select session_id, max(position) as max_pos
-			from messages where session_id = any(${sql.param(ids)}) group by session_id
-		) latest on latest.session_id = m.session_id and latest.max_pos = m.position
-	`)) as unknown as Array<{ session_id: string; role: string; excerpt: string | null }>;
-	const lastBySession = new Map(lastMessages.map((r) => [r.session_id, r]));
-
-	const board: BoardSession[] = rows.map((r) => ({
-		id: r.id,
-		state: r.state as SessionState,
-		machineId: r.machineId,
-		projectName: r.projectName ?? r.cwd,
-		projectId: r.projectId,
-		cwd: r.cwd,
-		branch: r.branch ?? undefined,
-		title: r.title ?? undefined,
-		modelId: r.modelId ?? undefined,
-		totalCostUsd: r.totalCostUsd,
-		turnCount: r.turnCount,
-		startedAt: r.startedAt.getTime(),
-		lastActivityAt: r.lastActivityAt.getTime(),
-		pendingApprovals: pendingBySession.get(r.id) ?? 0,
-		todo: todoProgress.get(r.id),
-		lastMessage: (() => {
-			const m = lastBySession.get(r.id);
-			return m ? { role: m.role, excerpt: m.excerpt ?? "", timestamp: 0 } : undefined;
-		})(),
-	}));
-	return c.json(board);
+	return c.json(await toBoardSessions(rows));
 });
+
+api.get("/api/sessions/recent", async (c) => {
+	const rows = await db
+		.select({
+			id: sessions.id,
+			title: sessions.title,
+			state: sessions.state,
+			projectName: projects.name,
+			cwd: sessions.cwd,
+			turnCount: sessions.turnCount,
+			lastActivityAt: sessions.lastActivityAt,
+		})
+		.from(sessions)
+		.leftJoin(projects, eq(sessions.projectId, projects.id))
+		.where(startedFilter(currentUser(c).id))
+		.orderBy(desc(sessions.lastActivityAt))
+		.limit(5);
+	const recent: RecentSessionDTO[] = rows.map((row) => ({
+		id: row.id,
+		title: row.title ?? undefined,
+		state: row.state as SessionState,
+		projectName: row.projectName ?? row.cwd,
+		turnCount: row.turnCount,
+		lastActivityAt: row.lastActivityAt.getTime(),
+	}));
+	return c.json(recent);
+});
+
+async function toBoardSessions(
+	rows: Array<{
+		id: string;
+		state: string;
+		machineId: string;
+		projectId: number | null;
+		projectName: string | null;
+		cwd: string;
+		branch: string | null;
+		title: string | null;
+		modelId: string | null;
+		totalCostUsd: number;
+		turnCount: number;
+		startedAt: Date;
+		lastActivityAt: Date;
+	}>,
+): Promise<BoardSession[]> {
+	if (rows.length === 0) return [];
+	const ids = rows.map((row) => row.id);
+	const [pending, todoProgress, lastMessages] = await Promise.all([
+		db
+			.select({ sessionId: approvals.sessionId, count: sql<number>`count(*)::int` })
+			.from(approvals)
+			.where(and(inArray(approvals.sessionId, ids), eq(approvals.status, "pending")))
+			.groupBy(approvals.sessionId),
+		activeTodoProgress(ids),
+		db.execute(sql`
+			select m.session_id, m.role, m.excerpt, m.position
+			from messages m
+			join (
+				select session_id, max(position) as max_pos
+				from messages where session_id = any(${sql.param(ids)}) group by session_id
+			) latest on latest.session_id = m.session_id and latest.max_pos = m.position
+		`) as Promise<Array<{ session_id: string; role: string; excerpt: string | null }>>,
+	]);
+	const pendingBySession = new Map(pending.map((row) => [row.sessionId, row.count]));
+	const lastBySession = new Map(lastMessages.map((row) => [row.session_id, row]));
+	return rows.map((row) => {
+		const last = lastBySession.get(row.id);
+		return {
+			id: row.id,
+			state: row.state as SessionState,
+			machineId: row.machineId,
+			projectName: row.projectName ?? row.cwd,
+			projectId: row.projectId,
+			cwd: row.cwd,
+			branch: row.branch ?? undefined,
+			title: row.title ?? undefined,
+			modelId: row.modelId ?? undefined,
+			totalCostUsd: row.totalCostUsd,
+			turnCount: row.turnCount,
+			startedAt: row.startedAt.getTime(),
+			lastActivityAt: row.lastActivityAt.getTime(),
+			pendingApprovals: pendingBySession.get(row.id) ?? 0,
+			todo: todoProgress.get(row.id),
+			lastMessage: last ? { role: last.role, excerpt: last.excerpt ?? "", timestamp: 0 } : undefined,
+		};
+	});
+}
 
 async function activeTodoProgress(sessionIds: string[]): Promise<Map<string, TodoProgress>> {
 	const lists = await db
@@ -119,39 +335,26 @@ async function activeTodoProgress(sessionIds: string[]): Promise<Map<string, Tod
 		.from(todoLists)
 		.where(and(inArray(todoLists.sessionId, sessionIds), isNull(todoLists.supersededAt)))
 		.orderBy(desc(todoLists.createdAt));
-	// newest active list per session (heartbeats may race supersede)
 	const newest = new Map<string, { id: number; createdAt: Date }>();
-	for (const l of lists) {
-		const cur = newest.get(l.sessionId);
-		if (!cur || l.createdAt > cur.createdAt) newest.set(l.sessionId, { id: l.id, createdAt: l.createdAt });
+	for (const list of lists) {
+		const current = newest.get(list.sessionId);
+		if (!current || list.createdAt > current.createdAt) newest.set(list.sessionId, { id: list.id, createdAt: list.createdAt });
 	}
 	if (newest.size === 0) return new Map();
-
 	const items = await db
-		.select({
-			listId: todos.listId,
-			content: todos.content,
-			state: todos.state,
-		})
+		.select({ listId: todos.listId, content: todos.content, state: todos.state })
 		.from(todos)
-		.where(inArray(todos.listId, [...newest.values()].map((l) => l.id)));
-
+		.where(inArray(todos.listId, [...newest.values()].map((list) => list.id)));
 	const progress = new Map<string, TodoProgress>();
 	for (const [sessionId, list] of newest) {
-		const listItems = items.filter((i) => i.listId === list.id);
+		const listItems = items.filter((item) => item.listId === list.id);
 		if (listItems.length === 0) continue;
-		const done = listItems.filter((i) => ["done", "completed"].includes(i.state)).length;
-		const current = listItems.find((i) => ["current", "in_progress"].includes(i.state));
-		progress.set(sessionId, {
-			done,
-			total: listItems.length,
-			current: current?.content,
-		});
+		const done = listItems.filter((item) => ["done", "completed"].includes(item.state)).length;
+		const current = listItems.find((item) => ["current", "in_progress"].includes(item.state));
+		progress.set(sessionId, { done, total: listItems.length, current: current?.content });
 	}
 	return progress;
 }
-
-// --- approvals -------------------------------------------------------------------
 
 api.get("/api/approvals", async (c) => {
 	const status = c.req.query("status");
@@ -174,26 +377,10 @@ api.get("/api/approvals", async (c) => {
 		.from(approvals)
 		.innerJoin(sessions, eq(approvals.sessionId, sessions.id))
 		.leftJoin(projects, eq(sessions.projectId, projects.id))
-		.where(status ? eq(approvals.status, status) : undefined)
+		.where(and(eq(sessions.userId, currentUser(c).id), status ? eq(approvals.status, status) : undefined))
 		.orderBy(desc(approvals.requestedAt))
 		.limit(100);
-
-	const dto: ApprovalDTO[] = rows.map((r) => ({
-		id: r.id,
-		sessionId: r.sessionId,
-		projectName: r.projectName ?? undefined,
-		sessionTitle: r.sessionTitle ?? undefined,
-		toolName: r.toolName,
-		input: r.input,
-		policyLabel: r.policyLabel,
-		status: r.status as ApprovalDTO["status"],
-		localPrompted: r.localPrompted,
-		requestedAt: r.requestedAt.getTime(),
-		decidedAt: r.decidedAt?.getTime(),
-		decidedBy: r.decidedBy ?? undefined,
-		note: r.note ?? undefined,
-	}));
-	return c.json(dto);
+	return c.json(toApprovalDtos(rows));
 });
 
 api.post("/api/approvals/:id/decision", async (c) => {
@@ -201,18 +388,17 @@ api.post("/api/approvals/:id/decision", async (c) => {
 	if (!body || (body.decision !== "approved" && body.decision !== "denied")) {
 		return c.json({ error: "body must be {decision: 'approved' | 'denied', note?}" }, 400);
 	}
-	const result = await decideApproval(
-		c.req.param("id"),
-		body.decision,
-		"web",
-		body.note,
-		sendToMachine,
-	);
-	if (!result.ok) return c.json(result, 409);
-	return c.json(result);
+	const [owned] = await db
+		.select({ id: approvals.id })
+		.from(approvals)
+		.innerJoin(sessions, eq(approvals.sessionId, sessions.id))
+		.where(and(eq(approvals.id, c.req.param("id")), eq(sessions.userId, currentUser(c).id)))
+		.limit(1);
+	if (!owned) return c.json({ error: "approval not found" }, 404);
+	const user = currentUser(c);
+	const result = await decideApproval(c.req.param("id"), body.decision, user.username, body.note, user.id, sendToMachine);
+	return result.ok ? c.json(result) : c.json(result, 409);
 });
-
-// --- history ---------------------------------------------------------------------
 
 api.get("/api/history", async (c) => {
 	const rows = await db
@@ -222,20 +408,20 @@ api.get("/api/history", async (c) => {
 			gitRemote: projects.gitRemote,
 			sessionCount: sql<number>`count(${sessions.id})::int`,
 			totalCostUsd: sql<number>`coalesce(sum(${sessions.totalCostUsd}), 0)::float8`,
-			lastActivityAt: sql<Date | null>`max(${sessions.lastActivityAt})`,
+			// postgres-js hands back timestamptz aggregates as strings, not Dates
+			lastActivityAt: sql<string | null>`max(${sessions.lastActivityAt})`,
 		})
 		.from(projects)
-		.leftJoin(sessions, eq(sessions.projectId, projects.id))
+		.innerJoin(sessions, and(eq(sessions.projectId, projects.id), eq(sessions.userId, currentUser(c).id)))
 		.groupBy(projects.id)
 		.orderBy(desc(sql`max(${sessions.lastActivityAt})`));
-
-	const dto: ProjectHistoryDTO[] = rows.map((r) => ({
-		id: r.id,
-		name: r.name,
-		gitRemote: r.gitRemote ?? undefined,
-		sessionCount: r.sessionCount,
-		totalCostUsd: r.totalCostUsd,
-		lastActivityAt: r.lastActivityAt ? new Date(r.lastActivityAt).getTime() : undefined,
+	const dto: ProjectHistoryDTO[] = rows.map((row) => ({
+		id: row.id,
+		name: row.name,
+		gitRemote: row.gitRemote ?? undefined,
+		sessionCount: row.sessionCount,
+		totalCostUsd: row.totalCostUsd,
+		lastActivityAt: row.lastActivityAt ? new Date(row.lastActivityAt).getTime() : undefined,
 	}));
 	return c.json(dto);
 });
@@ -244,156 +430,163 @@ api.get("/api/projects/:id/sessions", async (c) => {
 	const id = Number(c.req.param("id"));
 	if (!Number.isInteger(id)) return c.json({ error: "bad project id" }, 400);
 	const rows = await db
-		.select({
-			id: sessions.id,
-			title: sessions.title,
-			state: sessions.state,
-			turnCount: sessions.turnCount,
-			totalCostUsd: sessions.totalCostUsd,
-			startedAt: sessions.startedAt,
-			endedAt: sessions.endedAt,
-		})
+		.select({ id: sessions.id, title: sessions.title, state: sessions.state, turnCount: sessions.turnCount, totalCostUsd: sessions.totalCostUsd, startedAt: sessions.startedAt, endedAt: sessions.endedAt })
 		.from(sessions)
-		.where(eq(sessions.projectId, id))
+		.where(and(eq(sessions.projectId, id), eq(sessions.userId, currentUser(c).id)))
 		.orderBy(desc(sessions.startedAt))
 		.limit(200);
-	const dto: HistorySessionDTO[] = rows.map((r) => ({
-		id: r.id,
-		title: r.title ?? undefined,
-		state: r.state as SessionState,
-		turnCount: r.turnCount,
-		totalCostUsd: r.totalCostUsd,
-		startedAt: r.startedAt.getTime(),
-		endedAt: r.endedAt?.getTime(),
+	const dto: HistorySessionDTO[] = rows.map((row) => ({
+		id: row.id,
+		title: row.title ?? undefined,
+		state: row.state as SessionState,
+		turnCount: row.turnCount,
+		totalCostUsd: row.totalCostUsd,
+		startedAt: row.startedAt.getTime(),
+		endedAt: row.endedAt?.getTime(),
 	}));
 	return c.json(dto);
 });
 
-// --- session detail ----------------------------------------------------------------
-
 api.get("/api/sessions/:id", async (c) => {
 	const id = c.req.param("id");
 	const [row] = await db
-		.select({
-			session: sessions,
-			projectName: projects.name,
-		})
+		.select({ session: sessions, projectName: projects.name })
 		.from(sessions)
 		.leftJoin(projects, eq(sessions.projectId, projects.id))
-		.where(eq(sessions.id, id))
+		.where(and(eq(sessions.id, id), eq(sessions.userId, currentUser(c).id)))
 		.limit(1);
 	if (!row) return c.json({ error: "session not found" }, 404);
-
-	const [turnRows, messageRows, toolRows, approvalRows] = await Promise.all([
+	const [turnRows, messageRows, toolRows, approvalRows, usageRows] = await Promise.all([
 		db.select().from(turns).where(eq(turns.sessionId, id)).orderBy(turns.position),
-		db
-			.select()
-			.from(messages)
-			.where(eq(messages.sessionId, id))
-			.orderBy(desc(messages.position))
-			.limit(300),
+		db.select().from(messages).where(eq(messages.sessionId, id)).orderBy(desc(messages.position)).limit(300),
 		db.select().from(toolCalls).where(eq(toolCalls.sessionId, id)).orderBy(toolCalls.startedAt),
-		db
-			.select()
-			.from(approvals)
-			.where(eq(approvals.sessionId, id))
-			.orderBy(desc(approvals.requestedAt))
-			.limit(50),
+		db.select().from(approvals).where(eq(approvals.sessionId, id)).orderBy(desc(approvals.requestedAt)).limit(50),
+		// `messageRows` is capped at the latest 300; token totals need every row.
+		db.select({ usage: messages.usage }).from(messages).where(eq(messages.sessionId, id)),
 	]);
-
-	const pending = approvalRows.filter((a) => a.status === "pending").length;
 	const activeList = await db
 		.select({ id: todoLists.id })
 		.from(todoLists)
 		.where(and(eq(todoLists.sessionId, id), isNull(todoLists.supersededAt)))
 		.orderBy(desc(todoLists.createdAt))
 		.limit(1);
-	const todoRows =
-		activeList.length > 0
-			? await db.select().from(todos).where(eq(todos.listId, activeList[0].id)).orderBy(todos.position)
-			: [];
-
-	const s = row.session;
+	const todoRows = activeList.length > 0 ? await db.select().from(todos).where(eq(todos.listId, activeList[0].id)).orderBy(todos.position) : [];
+	const totalTokens = usageRows.reduce((total, row) => total + (extractTotalTokens(row.usage) ?? 0), 0);
+	const logicalTurns = mergeTurns(turnRows);
+	const displayedTurnPosition = displayTurnPositions(logicalTurns);
+	const session = row.session;
 	const detail: SessionDetailDTO = {
-		id: s.id,
-		state: s.state as SessionState,
-		machineId: s.machineId,
-		projectName: row.projectName ?? s.cwd,
-		projectId: s.projectId,
-		cwd: s.cwd,
-		branch: s.branch ?? undefined,
-		title: s.title ?? undefined,
-		modelId: s.modelId ?? undefined,
-		totalCostUsd: s.totalCostUsd,
-		turnCount: s.turnCount,
-		startedAt: s.startedAt.getTime(),
-		lastActivityAt: s.lastActivityAt.getTime(),
-		pendingApprovals: pending,
+		id: session.id,
+		state: session.state as SessionState,
+		machineId: session.machineId,
+		projectName: row.projectName ?? session.cwd,
+		projectId: session.projectId,
+		cwd: session.cwd,
+		branch: session.branch ?? undefined,
+		title: session.title ?? undefined,
+		modelId: session.modelId ?? undefined,
+		totalCostUsd: session.totalCostUsd,
+		turnCount: session.turnCount,
+		startedAt: session.startedAt.getTime(),
+		lastActivityAt: session.lastActivityAt.getTime(),
+		pendingApprovals: approvalRows.filter((approval) => approval.status === "pending").length,
 		lastMessage: undefined,
-		turns: turnRows.map((t) => ({
-			position: t.position,
-			prompt: t.prompt,
-			state: t.state as "running" | "done",
-			startedAt: t.startedAt.getTime(),
-			endedAt: t.endedAt?.getTime(),
+		totalTokens,
+		turns: logicalTurns,
+		messages: messageRows.map((message) => ({
+			position: message.position,
+			turnPosition: message.turnPosition == null ? undefined : (displayedTurnPosition.get(message.turnPosition) ?? message.turnPosition),
+			role: message.role,
+			excerpt: message.excerpt ?? undefined,
+			customType: message.customType ?? undefined,
+			costUsd: message.costUsd ?? undefined,
+			tokens: extractTotalTokens(message.usage),
+			timestamp: message.createdAt.getTime(),
+		})).reverse(),
+		toolCalls: toolRows.map((tool) => ({
+			toolCallId: tool.toolCallId,
+			turnPosition: tool.turnPosition == null ? undefined : (displayedTurnPosition.get(tool.turnPosition) ?? tool.turnPosition),
+			toolName: tool.toolName,
+			input: tool.input,
+			resultExcerpt: tool.resultExcerpt ?? undefined,
+			isError: tool.isError ?? false,
+			startedAt: tool.startedAt.getTime(),
+			durationMs: tool.durationMs ?? undefined,
 		})),
-		messages: messageRows
-			.map((m) => ({
-				position: m.position,
-				turnPosition: m.turnPosition ?? undefined,
-				role: m.role,
-				excerpt: m.excerpt ?? undefined,
-				customType: m.customType ?? undefined,
-				costUsd: m.costUsd ?? undefined,
-				timestamp: m.createdAt.getTime(),
-			}))
-			.reverse(),
-		toolCalls: toolRows.map((t) => ({
-			toolCallId: t.toolCallId,
-			turnPosition: t.turnPosition ?? undefined,
-			toolName: t.toolName,
-			input: t.input,
-			resultExcerpt: t.resultExcerpt ?? undefined,
-			isError: t.isError ?? false,
-			startedAt: t.startedAt.getTime(),
-			durationMs: t.durationMs ?? undefined,
-		})),
-		todos: todoRows.map((t) => ({ position: t.position, content: t.content, state: t.state })),
-		approvals: approvalRows.map((a) => ({
-			id: a.id,
-			sessionId: a.sessionId,
-			projectName: row.projectName ?? undefined,
-			sessionTitle: s.title ?? undefined,
-			toolName: a.toolName,
-			input: a.input,
-			policyLabel: a.policyLabel,
-			status: a.status as ApprovalDTO["status"],
-			localPrompted: a.localPrompted,
-			requestedAt: a.requestedAt.getTime(),
-			decidedAt: a.decidedAt?.getTime(),
-			decidedBy: a.decidedBy ?? undefined,
-			note: a.note ?? undefined,
-		})),
+		todos: todoRows.map((todo) => ({ position: todo.position, content: todo.content, state: todo.state })),
+		approvals: toApprovalDtos(approvalRows.map((approval) => ({ ...approval, sessionTitle: session.title, projectName: row.projectName }))),
 	};
 	return c.json(detail);
 });
 
-// --- SSE ----------------------------------------------------------------------------
-
 api.get("/api/events", (c) => {
+	const userId = currentUser(c).id;
 	return streamSSE(c, async (stream) => {
-		const unsubscribe = subscribe((event: BusEvent) => {
-			void stream.writeSSE({ event: "update", data: JSON.stringify(event) });
-		});
 		let closed = false;
+		const unsubscribe = subscribe((event: BusEvent) => {
+			void eventBelongsToUser(event, userId).then((belongs) => {
+				if (belongs && !closed) void stream.writeSSE({ event: "update", data: JSON.stringify(event) });
+			});
+		});
 		stream.onAbort(() => {
 			closed = true;
 			unsubscribe();
 		});
-		// Keep-alive + drop silently-closed clients.
 		while (!closed) {
 			await stream.writeSSE({ event: "ping", data: String(connectionStats().machines) });
 			await stream.sleep(25_000);
 		}
 	});
 });
+
+async function eventBelongsToUser(event: BusEvent, userId: string): Promise<boolean> {
+	const [session] = await db.select({ id: sessions.id }).from(sessions).where(and(eq(sessions.id, event.sessionId), eq(sessions.userId, userId))).limit(1);
+	return Boolean(session);
+}
+
+function toApprovalDtos(rows: Array<{
+	id: string;
+	sessionId: string;
+	toolName: string;
+	input: unknown;
+	policyLabel: string;
+	status: string;
+	localPrompted: boolean;
+	requestedAt: Date;
+	decidedAt: Date | null;
+	decidedBy: string | null;
+	note: string | null;
+	sessionTitle: string | null;
+	projectName: string | null;
+}>): ApprovalDTO[] {
+	return rows.map((row) => ({
+		id: row.id,
+		sessionId: row.sessionId,
+		projectName: row.projectName ?? undefined,
+		sessionTitle: row.sessionTitle ?? undefined,
+		toolName: row.toolName,
+		input: row.input,
+		policyLabel: row.policyLabel,
+		status: row.status as ApprovalDTO["status"],
+		localPrompted: row.localPrompted,
+		requestedAt: row.requestedAt.getTime(),
+		decidedAt: row.decidedAt?.getTime(),
+		decidedBy: row.decidedBy ?? undefined,
+		note: row.note ?? undefined,
+	}));
+}
+
+function isAdminOrMember(role: string): role is AuthUser["role"] {
+	return role === "admin" || role === "member";
+}
+
+function isUniqueViolation(error: unknown): boolean {
+	return (error as { cause?: { code?: string } })?.cause?.code === "23505";
+}
+
+function extractTotalTokens(usage: unknown): number | undefined {
+	if (!usage || typeof usage !== "object") return undefined;
+	const value = usage as Record<string, unknown>;
+	const parts = [value.input, value.output, value.cacheRead, value.cacheWrite].filter((part): part is number => typeof part === "number" && Number.isFinite(part));
+	return parts.length > 0 ? parts.reduce((sum, part) => sum + part, 0) : undefined;
+}

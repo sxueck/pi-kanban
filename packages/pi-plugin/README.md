@@ -9,13 +9,18 @@ risky tool calls with **local-first, cloud-fallback** approval.
 pnpm plugin:build && pnpm plugin:install   # copies dist/pi-kanban.ts to ~/.pi/agent/extensions/
 ```
 
-Then create `~/.pi/agent/pi-kanban.json`:
+Then set the machine Agent Token as an environment variable (it is no longer
+read from the config file) and create `~/.pi/agent/pi-kanban.json`:
+
+```sh
+# ~/.zshrc / ~/.bashrc — token stays out of dotfiles that other tools may read
+export PI_KANBAN_TOKEN="<your machine Agent Token from the dashboard Account page>"
+```
 
 ```json
 {
 	"server": {
-		"url": "ws://your-server:8787/agent",
-		"agentToken": "<AGENT_TOKEN of the server>"
+		"url": "ws://your-server:8787/agent"
 	},
 	"gate": {
 		"rules": [
@@ -34,7 +39,11 @@ Then create `~/.pi/agent/pi-kanban.json`:
 }
 ```
 
-Env overrides for quick tests: `PI_KANBAN_URL`, `PI_KANBAN_TOKEN`.
+Each pi user must create their own Agent Token in the dashboard **Account** page
+and export it as `PI_KANBAN_TOKEN` on their own machines. That token binds
+reported sessions to the user; it replaces the old server-wide `AGENT_TOKEN`.
+
+`PI_KANBAN_URL` remains available as an environment override for the server URL.
 
 ## Behavior
 
@@ -52,8 +61,14 @@ Env overrides for quick tests: `PI_KANBAN_URL`, `PI_KANBAN_TOKEN`.
 - **Session stream**: `session_start` / `turn_start` / `message_end` /
   `tool_execution_start|end` / `turn_end` (with todo snapshot from the session's
   `todo` extension entries) / `session_shutdown` -> WebSocket upstream.
-- **Heartbeat**: every 30s while connected; the server marks a session `offline`
-  after 90s of silence.
+- **Heartbeat**: every 30s the plugin POSTs `/agent/heartbeat` (Bearer token,
+  same payload as the WS heartbeat) — sessions stay alive even while the
+  WebSocket is down. The WS heartbeat doubles as a liveness probe: the server
+  acks it, and a connection with no inbound traffic for 90s is force-reconnected
+  (recovers half-open sockets after sleep/NAT changes instead of waiting for a
+  TCP timeout). The server also pings WS clients and reaps dead ones within
+  ~60s; the dashboard marks a session `offline` after 90s of total heartbeat
+  silence.
 - Transport is offline-tolerant: queued outbox (500 msgs), exponential reconnect;
   pending approval waits are released (allowed) on disconnect.
 

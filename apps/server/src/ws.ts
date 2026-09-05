@@ -1,24 +1,23 @@
 import { WebSocketServer, type WebSocket } from "ws";
-import type {
-	ApprovalDecisionMessage,
-	DownstreamMessage,
-	HelloAckMessage,
-	UpstreamMessage,
-} from "@pi-kanban/shared";
+import type { DownstreamMessage, HelloAckMessage, UpstreamMessage } from "@pi-kanban/shared";
 import { PROTOCOL_VERSION } from "@pi-kanban/shared";
-import { handleUpstream, type ConnContext } from "./ingest.js";
+import { handleUpstream } from "./ingest.js";
+import { authenticateAgentToken } from "./auth.js";
 
 interface AgentConnection {
 	ws: WebSocket;
 	machineId: string;
 	machineName?: string;
+	userId: string;
 	authenticated: boolean;
+	/** Set false before each ping; a pong flips it back. False twice = dead socket. */
+	isAlive: boolean;
 	/** Serializes upstream handling per connection: upstream messages are ordered
 	 * (session_start must land before turn_start) and handlers are async. */
 	queue: Promise<void>;
 }
 
-const connections = new Map<string, AgentConnection>(); // machineId -> conn
+const connections = new Map<string, AgentConnection>(); // userId:machineId -> conn
 const sockets = new WeakMap<WebSocket, AgentConnection>();
 
 export const agentWss = new WebSocketServer({ noServer: true });
@@ -29,7 +28,9 @@ export function handleUpgrade(ws: WebSocket): void {
 	const conn: AgentConnection = {
 		ws,
 		machineId: "",
+		userId: "",
 		authenticated: false,
+		isAlive: true,
 		queue: Promise.resolve(),
 	};
 	sockets.set(ws, conn);
@@ -37,6 +38,10 @@ export function handleUpgrade(ws: WebSocket): void {
 	const helloTimer = setTimeout(() => {
 		if (!conn.authenticated) ws.close(4001, "hello timeout");
 	}, HELLO_TIMEOUT_MS);
+
+	ws.on("pong", () => {
+		conn.isAlive = true;
+	});
 
 	ws.on("message", (data) => {
 		const raw = data.toString();
@@ -46,8 +51,8 @@ export function handleUpgrade(ws: WebSocket): void {
 	});
 	ws.on("close", () => {
 		clearTimeout(helloTimer);
-		if (conn.machineId && connections.get(conn.machineId)?.ws === ws) {
-			connections.delete(conn.machineId);
+		if (conn.machineId && connections.get(connectionKey(conn.userId, conn.machineId))?.ws === ws) {
+			connections.delete(connectionKey(conn.userId, conn.machineId));
 		}
 	});
 	ws.on("error", () => ws.close());
@@ -92,8 +97,8 @@ async function authenticate(
 	conn: AgentConnection,
 	hello: Extract<UpstreamMessage, { type: "hello" }>,
 ): Promise<HelloAckMessage> {
-	const expected = process.env.AGENT_TOKEN;
-	if (!expected || hello.agentToken !== expected) {
+	const agent = await authenticateAgentToken(hello.agentToken);
+	if (!agent) {
 		return { type: "hello_ack", ok: false, error: "invalid agent token", serverTime: Date.now() };
 	}
 	if (hello.protocolVersion !== PROTOCOL_VERSION) {
@@ -106,9 +111,10 @@ async function authenticate(
 	}
 	conn.machineId = hello.machineId;
 	conn.machineName = hello.machineName;
+	conn.userId = agent.userId;
 	conn.authenticated = true;
 	// Last connection per machine wins.
-	connections.set(hello.machineId, conn);
+	connections.set(connectionKey(agent.userId, hello.machineId), conn);
 	return { type: "hello_ack", ok: true, serverTime: Date.now() };
 }
 
@@ -130,14 +136,37 @@ function reportIngestError(conn: AgentConnection, msg: UpstreamMessage, error: u
 
 /** Best-effort downstream push; returns false when the machine is offline. */
 export function sendToMachine(
+	userId: string,
 	machineId: string,
 	msg: DownstreamMessage,
 ): boolean {
-	const conn = connections.get(machineId);
+	const conn = connections.get(connectionKey(userId, machineId));
 	if (!conn || conn.ws.readyState !== conn.ws.OPEN) return false;
 	send(conn.ws, msg);
 	return true;
 }
+
+function connectionKey(userId: string, machineId: string): string {
+	return `${userId}:${machineId}`;
+}
+
+// Server-initiated ping/pong: undici-based clients auto-pong, so any pinged
+// connection answers within an interval. Sockets gone silent (sleep, NAT
+// teardown, half-open TCP) are terminated within ~2 intervals instead of
+// lingering in the map until a TCP timeout — dead entries would swallow
+// approval decisions pushed via sendToMachine.
+const PING_INTERVAL_MS = 30_000;
+const keepalive = setInterval(() => {
+	for (const conn of connections.values()) {
+		if (!conn.isAlive) {
+			conn.ws.terminate();
+			continue;
+		}
+		conn.isAlive = false;
+		conn.ws.ping();
+	}
+}, PING_INTERVAL_MS);
+keepalive.unref();
 
 function send(ws: WebSocket, msg: DownstreamMessage): void {
 	if (ws.readyState !== ws.OPEN) return;

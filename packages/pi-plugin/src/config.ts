@@ -4,7 +4,7 @@ import { homedir, hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import type { PluginConfig } from "@pi-kanban/shared";
 
-const AGENT_DIR = join(homedir(), ".pi", "agent");
+const AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const CONFIG_PATH = join(AGENT_DIR, "pi-kanban.json");
 const MACHINE_ID_PATH = join(AGENT_DIR, "pi-kanban-machine-id");
 
@@ -24,7 +24,6 @@ function defaultConfig(): PluginConfig {
 	return {
 		server: {
 			url: process.env.PI_KANBAN_URL ?? "ws://localhost:8787/agent",
-			agentToken: process.env.PI_KANBAN_TOKEN ?? "",
 		},
 		gate: {
 			rules: DEFAULT_RULES,
@@ -45,7 +44,14 @@ export function loadConfig(): PluginConfig {
 	if (existsSync(CONFIG_PATH)) {
 		try {
 			const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as Partial<PluginConfig>;
-			if (raw.server) Object.assign(config.server, raw.server);
+			if (raw.server) {
+				// Migration: tokens were once kept in the config file; they are env-only now.
+				if ("agentToken" in raw.server) {
+					delete (raw.server as { agentToken?: unknown }).agentToken;
+					console.error(`[pi-kanban] server.agentToken in ${CONFIG_PATH} is ignored — set the PI_KANBAN_TOKEN environment variable instead`);
+				}
+				Object.assign(config.server, raw.server);
+			}
 			if (raw.gate) Object.assign(config.gate, raw.gate);
 			if (raw.report) Object.assign(config.report, raw.report);
 		} catch (error) {
@@ -53,6 +59,11 @@ export function loadConfig(): PluginConfig {
 		}
 	}
 	return config;
+}
+
+/** Machine agent token — env-only by design so it never lands in a dotfile. */
+export function agentToken(): string {
+	return process.env.PI_KANBAN_TOKEN ?? "";
 }
 
 /** Stable per-machine identity (survives reinstalls, unique per device). */

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "";
+export const UNAUTHORIZED_EVENT = "pi-kanban:unauthorized";
 
 export function getToken(): string {
 	return localStorage.getItem("pikanban_token") ?? "";
@@ -10,11 +11,31 @@ export function setToken(token: string): void {
 	localStorage.setItem("pikanban_token", token);
 }
 
+export function clearToken(): void {
+	localStorage.removeItem("pikanban_token");
+}
+
+export async function apiGetPublic<T>(path: string): Promise<T> {
+	const res = await fetch(`${API_BASE}${path}`);
+	if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+	return (await res.json()) as T;
+}
+
+export async function apiPostPublic<T>(path: string, body: unknown, headers?: HeadersInit): Promise<T> {
+	const res = await fetch(`${API_BASE}${path}`, {
+		method: "POST",
+		headers: { "content-type": "application/json", ...headers },
+		body: JSON.stringify(body),
+	});
+	if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+	return (await res.json()) as T;
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
 	const res = await fetch(`${API_BASE}${path}`, {
 		headers: { authorization: `Bearer ${getToken()}` },
 	});
-	if (res.status === 401) throw new UnauthorizedError();
+	if (res.status === 401) throwUnauthorized();
 	if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
 	return (await res.json()) as T;
 }
@@ -28,9 +49,23 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
 		},
 		body: JSON.stringify(body),
 	});
-	if (res.status === 401) throw new UnauthorizedError();
+	if (res.status === 401) throwUnauthorized();
 	if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
 	return (await res.json()) as T;
+}
+
+export async function apiDelete(path: string): Promise<void> {
+	const res = await fetch(`${API_BASE}${path}`, {
+		method: "DELETE",
+		headers: { authorization: `Bearer ${getToken()}` },
+	});
+	if (res.status === 401) throwUnauthorized();
+	if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+}
+
+function throwUnauthorized(): never {
+	window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+	throw new UnauthorizedError();
 }
 
 export class UnauthorizedError extends Error {

@@ -5,6 +5,7 @@ import { runGate } from "../src/gate.js";
 import type { GateTransport } from "../src/gate.js";
 import type { DecisionVerdict } from "../src/transport.js";
 import { Transport } from "../src/transport.js";
+import { TurnState } from "../src/turn-state.js";
 
 const PUSH_EVENT = {
 	toolName: "bash",
@@ -120,6 +121,21 @@ function approvalRequest(toolCallId: string): Omit<ApprovalRequestMessage, "requ
 }
 
 const tests: Array<[string, () => Promise<void>]> = [
+	[
+		"turn state: every session starts at position one and preserves event linkage",
+		async () => {
+			const turns = new TurnState();
+			turns.reset();
+			assert.equal(turns.current, undefined);
+			assert.equal(turns.start(), 1);
+			assert.equal(turns.current, 1);
+			assert.equal(turns.finish(), 1);
+			assert.equal(turns.current, undefined);
+			turns.reset();
+			assert.equal(turns.start(), 1);
+			assert.equal(turns.start(), 2);
+		},
+	],
 	[
 		"offline + TUI: rule matches but plugin is inert — no prompt, no request, allowed",
 		async () => {
