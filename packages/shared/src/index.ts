@@ -103,6 +103,29 @@ export interface ToolResultReportMessage {
 	durationMs?: number;
 }
 
+export interface ProjectSnapshotFile {
+	/** Path relative to the project root. Source contents are never included. */
+	path: string;
+	size?: number;
+}
+
+export interface ProjectSnapshotMessage {
+	type: "project_snapshot";
+	sessionId: string;
+	cwd: string;
+	gitRemote?: string;
+	gitBranch?: string;
+	hash: string;
+	files: ProjectSnapshotFile[];
+	git: {
+		head?: string;
+		status: string[];
+	};
+	diagnostics: string[];
+	truncated: boolean;
+	createdAt: number;
+}
+
 /** Full todo/task-list snapshot (append-only versioned lists). */
 export interface TodoSnapshotMessage {
 	type: "todo_snapshot";
@@ -149,6 +172,7 @@ export type UpstreamMessage =
 	| MessageReportMessage
 	| ToolCallReportMessage
 	| ToolResultReportMessage
+	| ProjectSnapshotMessage
 	| TodoSnapshotMessage
 	| ApprovalRequestMessage
 	| ApprovalLocalResolutionMessage
@@ -315,6 +339,67 @@ export interface DailyStatDTO {
 export interface LifetimeStatDTO {
 	totalCostUsd: number;
 	totalTokens: number;
+}
+
+export type ProjectMemoryStatus = "candidate" | "confirmed" | "pinned" | "archived";
+export type ProjectMemoryKind = "fact" | "decision" | "preference" | "pattern" | "issue";
+
+export interface ProjectMemoryDTO {
+	id: string;
+	version: number;
+	kind: ProjectMemoryKind;
+	content: string;
+	status: ProjectMemoryStatus;
+	evidence: Array<{ sessionId: string; turnPosition?: number }>;
+	createdAt: number;
+}
+
+export type ProjectTreeNodeKind = "project" | "module" | "decision" | "milestone" | "issue" | "evidence";
+
+export interface ProjectTreeNodeDTO {
+	id: string;
+	parentId?: string;
+	kind: ProjectTreeNodeKind;
+	label: string;
+	detail?: string;
+	severity?: "info" | "warning" | "error";
+	sessionId?: string;
+	turnPosition?: number;
+}
+
+export interface ProjectInspectionDTO {
+	enabled: boolean;
+	intervalMinutes: number;
+	running: boolean;
+	lastRunAt?: number;
+	nextRunAt?: number;
+	lastError?: string;
+}
+
+export interface ProjectWorkDTO {
+	project: { id: number; name: string; gitRemote?: string };
+	memories: ProjectMemoryDTO[];
+	tree: ProjectTreeNodeDTO[];
+	inspection: ProjectInspectionDTO;
+	snapshotUpdatedAt?: number;
+}
+
+export interface ModelSettingsDTO {
+	baseUrl: string;
+	model: string;
+	enabled: boolean;
+	intervalMinutes: number;
+	hasApiKey: boolean;
+	updatedAt?: number;
+}
+
+export interface ModelSettingsInput {
+	baseUrl: string;
+	model: string;
+	enabled: boolean;
+	intervalMinutes: number;
+	/** Omit to keep the current key; an empty value clears it. */
+	apiKey?: string;
 }
 
 export interface HistorySessionDTO {

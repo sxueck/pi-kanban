@@ -233,3 +233,108 @@ export const approvals = pgTable(
 		index("idx_approvals_session").on(t.sessionId),
 	],
 );
+
+export const modelSettings = pgTable("model_settings", {
+	id: integer("id").primaryKey().default(1),
+	baseUrl: text("base_url").notNull().default(""),
+	model: text("model").notNull().default("gpt-4o-mini"),
+	apiKeyCipher: text("api_key_cipher"),
+	enabled: boolean("enabled").notNull().default(false),
+	inspectionIntervalMinutes: integer("inspection_interval_minutes").notNull().default(60),
+	updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const projectSnapshots = pgTable(
+	"project_snapshots",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		userId: uuid("user_id")
+			.notNull()
+			.references(() => users.id, { onDelete: "cascade" }),
+		projectId: integer("project_id")
+			.notNull()
+			.references(() => projects.id, { onDelete: "cascade" }),
+		sessionId: text("session_id")
+			.notNull()
+			.references(() => sessions.id, { onDelete: "cascade" }),
+		snapshotHash: text("snapshot_hash").notNull(),
+		files: jsonb("files").notNull(),
+		git: jsonb("git").notNull(),
+		diagnostics: jsonb("diagnostics").notNull(),
+		truncated: boolean("truncated").notNull().default(false),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(t) => [
+		unique("uq_project_snapshots_user_project_hash").on(t.userId, t.projectId, t.snapshotHash),
+		index("idx_project_snapshots_latest").on(t.userId, t.projectId, t.createdAt),
+	],
+);
+
+export const projectAnalysisStates = pgTable(
+	"project_analysis_states",
+	{
+		id: serial("id").primaryKey(),
+		userId: uuid("user_id")
+			.notNull()
+			.references(() => users.id, { onDelete: "cascade" }),
+		projectId: integer("project_id")
+			.notNull()
+			.references(() => projects.id, { onDelete: "cascade" }),
+		nextInspectionAt: timestamp("next_inspection_at", { withTimezone: true }),
+		lockedAt: timestamp("locked_at", { withTimezone: true }),
+		lastInspectionAt: timestamp("last_inspection_at", { withTimezone: true }),
+		lastError: text("last_error"),
+		latestTree: jsonb("latest_tree"),
+		updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(t) => [
+		unique("uq_project_analysis_states_user_project").on(t.userId, t.projectId),
+		index("idx_project_analysis_states_due").on(t.nextInspectionAt, t.lockedAt),
+	],
+);
+
+export const projectInspections = pgTable(
+	"project_inspections",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		userId: uuid("user_id")
+			.notNull()
+			.references(() => users.id, { onDelete: "cascade" }),
+		projectId: integer("project_id")
+			.notNull()
+			.references(() => projects.id, { onDelete: "cascade" }),
+		trigger: text("trigger").notNull(),
+		status: text("status").notNull().default("running"),
+		redactionCount: integer("redaction_count").notNull().default(0),
+		error: text("error"),
+		startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+		finishedAt: timestamp("finished_at", { withTimezone: true }),
+	},
+	(t) => [index("idx_project_inspections_project").on(t.userId, t.projectId, t.startedAt)],
+);
+
+export const projectMemories = pgTable(
+	"project_memories",
+	{
+		id: serial("id").primaryKey(),
+		memoryKey: uuid("memory_key").notNull(),
+		userId: uuid("user_id")
+			.notNull()
+			.references(() => users.id, { onDelete: "cascade" }),
+		projectId: integer("project_id")
+			.notNull()
+			.references(() => projects.id, { onDelete: "cascade" }),
+		version: integer("version").notNull().default(1),
+		kind: text("kind").notNull(),
+		content: text("content").notNull(),
+		status: text("status").notNull().default("candidate"),
+		evidence: jsonb("evidence").notNull(),
+		sourceInspectionId: uuid("source_inspection_id").references(() => projectInspections.id, { onDelete: "set null" }),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+		supersededAt: timestamp("superseded_at", { withTimezone: true }),
+	},
+	(t) => [
+		unique("uq_project_memories_key_version").on(t.memoryKey, t.version),
+		index("idx_project_memories_active").on(t.userId, t.projectId, t.supersededAt),
+	],
+);

@@ -7,7 +7,11 @@ import type {
 	DailyStatDTO,
 	HistorySessionDTO,
 	LifetimeStatDTO,
+	ModelSettingsInput,
 	ProjectHistoryDTO,
+	ProjectMemoryStatus,
+	ProjectTreeNodeDTO,
+	ProjectWorkDTO,
 	RecentSessionDTO,
 	SessionDetailDTO,
 	SessionState,
@@ -18,7 +22,10 @@ import {
 	agentTokens,
 	approvals,
 	messages,
+	projectAnalysisStates,
+	projectMemories,
 	projects,
+	projectSnapshots,
 	sessions,
 	todoLists,
 	todos,
@@ -40,12 +47,25 @@ import {
 	verifyPassword,
 	type AuthUser,
 } from "./auth.js";
-import { subscribe, type BusEvent } from "./bus.js";
+import { publish, subscribe, type BusEvent } from "./bus.js";
 import { displayTurnPositions, mergeTurns } from "./merge-turns.js";
 import { decideApproval } from "./approvals.js";
 import { handleUpstream } from "./ingest.js";
 import { sendToMachine } from "./ws.js";
 import { connectionStats } from "./ws.js";
+import {
+	decryptApiKey,
+	readModelSettings,
+	saveModelSettings,
+	toModelSettingsDto,
+} from "./model-settings.js";
+import { CONNECTION_TEST_TIMEOUT_MS, requestInspection } from "./model.js";
+import {
+	ensureProjectAnalysisState,
+	INSPECTION_LOCK_TTL_MS,
+	queueProjectInspection,
+	toMemoryDto,
+} from "./inspector.js";
 
 type AppEnv = { Variables: { auth: AuthUser } };
 export const api = new Hono<AppEnv>();
@@ -135,6 +155,40 @@ api.post("/api/auth/logout", async (c) => {
 	const token = bearerToken(c.req.header("authorization"));
 	if (token) await revokeWebSession(token);
 	return c.json({ ok: true });
+});
+
+api.get("/api/settings/model", async (c) => {
+	if (!isAdmin(currentUser(c))) return c.json({ error: "forbidden" }, 403);
+	return c.json(toModelSettingsDto(await readModelSettings()));
+});
+
+api.post("/api/settings/model", async (c) => {
+	if (!isAdmin(currentUser(c))) return c.json({ error: "forbidden" }, 403);
+	const body = await c.req.json<ModelSettingsInput>().catch(() => null);
+	if (!body) return c.json({ error: "invalid settings body" }, 400);
+	try {
+		return c.json(await saveModelSettings(body));
+	} catch (error) {
+		return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+	}
+});
+
+api.post("/api/settings/model/test", async (c) => {
+	if (!isAdmin(currentUser(c))) return c.json({ error: "forbidden" }, 403);
+	const settings = await readModelSettings();
+	if (!settings?.apiKeyCipher || !settings.baseUrl || !settings.model) {
+		return c.json({ error: "model connection is incomplete" }, 400);
+	}
+	try {
+		await requestInspection(
+			{ baseUrl: settings.baseUrl, model: settings.model, apiKey: decryptApiKey(settings.apiKeyCipher) },
+			{ project: { name: "connection-test" }, sessions: [], knownMemories: [] },
+			{ timeoutMs: CONNECTION_TEST_TIMEOUT_MS, purpose: "model connection test" },
+		);
+		return c.json({ ok: true });
+	} catch (error) {
+		return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
+	}
 });
 
 api.get("/api/users", async (c) => {
@@ -478,6 +532,103 @@ api.get("/api/history", async (c) => {
 	return c.json(dto);
 });
 
+api.get("/api/projects/:id/work", async (c) => {
+	const projectId = Number(c.req.param("id"));
+	if (!Number.isInteger(projectId)) return c.json({ error: "bad project id" }, 400);
+	const userId = currentUser(c).id;
+	const [owned] = await db
+		.select({ id: projects.id, name: projects.name, gitRemote: projects.gitRemote })
+		.from(projects)
+		.innerJoin(sessions, and(eq(sessions.projectId, projects.id), eq(sessions.userId, userId)))
+		.where(eq(projects.id, projectId))
+		.limit(1);
+	if (!owned) return c.json({ error: "project not found" }, 404);
+	await ensureProjectAnalysisState(userId, projectId);
+	const [memoryRows, stateRows, snapshotRows, settings] = await Promise.all([
+		db.select().from(projectMemories).where(and(eq(projectMemories.userId, userId), eq(projectMemories.projectId, projectId), isNull(projectMemories.supersededAt))).orderBy(desc(projectMemories.createdAt)),
+		db.select().from(projectAnalysisStates).where(and(eq(projectAnalysisStates.userId, userId), eq(projectAnalysisStates.projectId, projectId))).limit(1),
+		db.select({ createdAt: projectSnapshots.createdAt }).from(projectSnapshots).where(and(eq(projectSnapshots.userId, userId), eq(projectSnapshots.projectId, projectId))).orderBy(desc(projectSnapshots.createdAt)).limit(1),
+		readModelSettings(),
+	]);
+	const state = stateRows[0];
+	const dto: ProjectWorkDTO = {
+		project: { id: owned.id, name: owned.name, gitRemote: owned.gitRemote ?? undefined },
+		memories: memoryRows.map(toMemoryDto),
+		tree: asProjectTree(state?.latestTree),
+		inspection: {
+			enabled: settings?.enabled ?? false,
+			intervalMinutes: settings?.inspectionIntervalMinutes ?? 60,
+			running: Boolean(state?.lockedAt && Date.now() - state.lockedAt.getTime() < INSPECTION_LOCK_TTL_MS),
+			lastRunAt: state?.lastInspectionAt?.getTime(),
+			nextRunAt: state?.nextInspectionAt?.getTime(),
+			lastError: state?.lastError ?? undefined,
+		},
+		snapshotUpdatedAt: snapshotRows[0]?.createdAt.getTime(),
+	};
+	return c.json(dto);
+});
+
+api.post("/api/projects/:id/inspect", async (c) => {
+	const projectId = Number(c.req.param("id"));
+	if (!Number.isInteger(projectId)) return c.json({ error: "bad project id" }, 400);
+	const userId = currentUser(c).id;
+	const [owned] = await db.select({ id: sessions.id }).from(sessions).where(and(eq(sessions.userId, userId), eq(sessions.projectId, projectId))).limit(1);
+	if (!owned) return c.json({ error: "project not found" }, 404);
+	try {
+		const started = await queueProjectInspection(userId, projectId, "manual");
+		return started ? c.json({ started: true }, 202) : c.json({ error: "inspection already running" }, 409);
+	} catch (error) {
+		return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+	}
+});
+
+api.post("/api/projects/:id/memories/:memoryId/status", async (c) => {
+	const projectId = Number(c.req.param("id"));
+	if (!Number.isInteger(projectId)) return c.json({ error: "bad project id" }, 400);
+	const memoryId = c.req.param("memoryId");
+	if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(memoryId)) {
+		return c.json({ error: "bad memory id" }, 400);
+	}
+	const body = await c.req.json<{ status?: unknown }>().catch(() => null);
+	const statuses: ProjectMemoryStatus[] = ["candidate", "confirmed", "pinned", "archived"];
+	if (!body || !statuses.includes(body.status as ProjectMemoryStatus)) return c.json({ error: "invalid memory status" }, 400);
+	const userId = currentUser(c).id;
+	const [current] = await db.select().from(projectMemories).where(and(
+		eq(projectMemories.memoryKey, memoryId),
+		eq(projectMemories.projectId, projectId),
+		eq(projectMemories.userId, userId),
+		isNull(projectMemories.supersededAt),
+	)).limit(1);
+	if (!current) return c.json({ error: "memory not found" }, 404);
+	const now = new Date();
+	try {
+		const created = await db.transaction(async (tx) => {
+			const [superseded] = await tx.update(projectMemories).set({ supersededAt: now }).where(and(eq(projectMemories.id, current.id), isNull(projectMemories.supersededAt))).returning({ id: projectMemories.id });
+			if (!superseded) throw new Error("memory version conflict");
+			const [next] = await tx.insert(projectMemories).values({
+				memoryKey: current.memoryKey,
+				userId,
+				projectId,
+				version: current.version + 1,
+				createdAt: current.createdAt,
+				kind: current.kind,
+				content: current.content,
+				status: body.status as ProjectMemoryStatus,
+				evidence: current.evidence,
+				sourceInspectionId: current.sourceInspectionId,
+			}).returning();
+			return next;
+		});
+		publish({ type: "project_update", userId, projectId });
+		return c.json(toMemoryDto(created));
+	} catch (error) {
+		if (isUniqueViolation(error) || (error instanceof Error && error.message === "memory version conflict")) {
+			return c.json({ error: "memory was updated by another request" }, 409);
+		}
+		throw error;
+	}
+});
+
 api.get("/api/projects/:id/sessions", async (c) => {
 	const id = Number(c.req.param("id"));
 	if (!Number.isInteger(id)) return c.json({ error: "bad project id" }, 400);
@@ -598,6 +749,7 @@ api.get("/api/events", (c) => {
 });
 
 async function eventBelongsToUser(event: BusEvent, userId: string): Promise<boolean> {
+	if (event.type === "project_update") return event.userId === userId;
 	const [session] = await db.select({ id: sessions.id }).from(sessions).where(and(eq(sessions.id, event.sessionId), eq(sessions.userId, userId))).limit(1);
 	return Boolean(session);
 }
@@ -632,6 +784,13 @@ function toApprovalDtos(rows: Array<{
 		decidedBy: row.decidedBy ?? undefined,
 		note: row.note ?? undefined,
 	}));
+}
+
+function asProjectTree(value: unknown): ProjectTreeNodeDTO[] {
+	if (!Array.isArray(value)) return [];
+	return value.filter((node): node is ProjectTreeNodeDTO => Boolean(
+		node && typeof node === "object" && typeof (node as { id?: unknown }).id === "string" && typeof (node as { label?: unknown }).label === "string",
+	));
 }
 
 function isAdminOrMember(role: string): role is AuthUser["role"] {

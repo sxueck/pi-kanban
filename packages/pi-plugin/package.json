@@ -14,7 +14,7 @@
 		"build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 --outfile=dist/pi-kanban.js --legal-comments=none && node -e \"require('node:fs').renameSync('dist/pi-kanban.js','dist/pi-kanban.ts')\"",
 		"prepack": "npm run build",
 		"install-ext": "node scripts/install.mjs",
-		"test": "esbuild test/gate.test.ts --bundle --format=esm --platform=node --target=node22 --outfile=dist/gate.test.mjs --legal-comments=none && node dist/gate.test.mjs",
+		"test": "esbuild test/gate.test.ts test/project-snapshot.test.ts --bundle --format=esm --platform=node --target=node22 --outdir=dist --out-extension:.js=.mjs --legal-comments=none && node dist/gate.test.mjs && node dist/project-snapshot.test.mjs",
 		"typecheck": "tsc --noEmit"
 	},
 	"devDependencies": {

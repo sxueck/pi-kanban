@@ -63,6 +63,22 @@ export async function apiDelete(path: string): Promise<void> {
 	if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
 }
 
+/**
+ * Extract a friendly message from an apiGet/apiPost error. Non-2xx responses
+ * throw `${status} ${body}` where body is usually `{"error": "..."}` JSON.
+ */
+export function apiErrorMessage(err: unknown): string {
+	if (!(err instanceof Error)) return String(err);
+	const text = err.message.replace(/^\d+\s+/, "");
+	try {
+		const parsed = JSON.parse(text) as { error?: unknown };
+		if (typeof parsed.error === "string") return parsed.error;
+	} catch {
+		// not JSON — fall back to the raw message
+	}
+	return err.message;
+}
+
 function throwUnauthorized(): never {
 	window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
 	throw new UnauthorizedError();

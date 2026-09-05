@@ -1,8 +1,8 @@
-import { execFile } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncate } from "@pi-kanban/shared";
 import type { TodoSnapshotMessage } from "@pi-kanban/shared";
 import { agentToken, loadConfig } from "./config.js";
+import { collectProjectSnapshot, gitIdentity, SnapshotThrottle } from "./project-snapshot.js";
 import { Transport } from "./transport.js";
 import { TurnState } from "./turn-state.js";
 import { runGate, type GateDeps } from "./gate.js";
@@ -13,7 +13,7 @@ import { runGate, type GateDeps } from "./gate.js";
  * approval. Runtime deps are bundled; pi package is type-only.
  */
 export default function (pi: ExtensionAPI): void {
- const config = loadConfig();
+	const config = loadConfig();
 	const token = agentToken();
 	if (!token) {
 		// No token = never connectable = the plugin stays fully inert (the gate
@@ -24,6 +24,7 @@ export default function (pi: ExtensionAPI): void {
 	transport.connect();
 
 	let sessionId: string | null = null;
+	const snapshotThrottle = new SnapshotThrottle();
 	let messagePosition = 0;
 	const turns = new TurnState();
 	let lastPrompt = "";
@@ -56,17 +57,19 @@ export default function (pi: ExtensionAPI): void {
 		messagePosition = 0;
 		turns.reset();
 		lastTodoHash = "";
-		const [gitRemote, gitBranch] = await gitInfo(ctx.cwd);
+		const identity = await gitIdentity(ctx.cwd);
 		transport.send({
 			type: "session_start",
 			sessionId: id,
 			cwd: ctx.cwd,
-			gitRemote,
-			gitBranch,
+			gitRemote: identity.gitRemote,
+			gitBranch: identity.gitBranch,
 			title: pi.getSessionName() ?? null,
 			reason: event.reason,
 			startedAt: Date.now(),
 		});
+		snapshotThrottle.reset();
+		await refreshProjectSnapshot(ctx.cwd, identity, true);
 	});
 
 	pi.on("session_info_changed", (event) => {
@@ -115,6 +118,7 @@ export default function (pi: ExtensionAPI): void {
 			ttftMs: turnTtftMs,
 		});
 		await reportTodoSnapshot(ctx);
+		await refreshProjectSnapshot(ctx.cwd);
 	});
 
 	// TTFT: prompt submitted (before_agent_start) → first assistant message
@@ -193,6 +197,28 @@ export default function (pi: ExtensionAPI): void {
 		const trimmed = text.trim();
 		if (!trimmed) return undefined;
 		return truncate(trimmed, config.report.excerptChars);
+	}
+
+	async function refreshProjectSnapshot(
+		cwd: string,
+		identity?: { gitRemote?: string; gitBranch?: string },
+		force = false,
+	): Promise<void> {
+		if (!sessionId) return;
+		const now = Date.now();
+		if (!force && !snapshotThrottle.isDue(now)) return;
+		try {
+			const snapshot = await collectProjectSnapshot({
+				sessionId,
+				cwd,
+				...(identity ?? (await gitIdentity(cwd))),
+			});
+			const changed = snapshotThrottle.observe(snapshot.hash, now);
+			if (changed || force) transport.send(snapshot);
+		} catch (error) {
+			snapshotThrottle.markRefreshed(now);
+			console.error("[pi-kanban] project snapshot failed:", error);
+		}
 	}
 
 	async function reportTodoSnapshot(ctx: { sessionManager: { getEntries(): unknown[] } }): Promise<void> {
@@ -276,20 +302,4 @@ function modelId(ctx: { model?: { provider?: string; id?: string } }): string | 
 function contextWindow(ctx: { model?: { contextWindow?: unknown } }): number | undefined {
 	const window = ctx.model?.contextWindow;
 	return typeof window === "number" && Number.isFinite(window) && window > 0 ? window : undefined;
-}
-
-function gitInfo(cwd: string): Promise<[string | undefined, string | undefined]> {
-	const run = (args: string[]): Promise<string | undefined> =>
-		new Promise((resolve) => {
-			execFile(
-				"git",
-				args,
-				{ cwd, timeout: 1500 },
-				(error, stdout) => resolve(error ? undefined : stdout.trim() || undefined),
-			);
-		});
-	return Promise.all([
-		run(["remote", "get-url", "origin"]),
-		run(["rev-parse", "--abbrev-ref", "HEAD"]),
-	]);
 }
