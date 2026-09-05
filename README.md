@@ -7,6 +7,7 @@ Cloud web kanban for [pi](https://github.com/earendil-works/pi-coding-agent) cod
 - **Live progress** — running / waiting / idle / offline sessions with turn,
   message, tool-call, todo and cost telemetry.
 - **Session history** — finished sessions grouped by git project.
+- **Project memory** — PII-redacted model inspections produce reviewable, versioned memories plus a project structure and issue tree.
 - **Multi-user isolation** — local username/password accounts, per-user Agent Tokens, and private session, approval, and history views.
 
 A pi **extension** is injected locally and pushes the session stream upstream
@@ -21,6 +22,7 @@ pi extension (packages/pi-plugin)                apps/server                    
 session_start/end ──┐
 turn_start/end      │ WebSocket        ingest → Postgres (drizzle)
 message_end (+cost) ├────────────────▶  approvals ──▶ WS push ──┐      Board / Approvals /
+project_snapshot     │  /agent           inspect → memories/tree ├──◀── SSE  History / Detail
 tool_execution_*    │  /agent           REST /api/*             ├──◀── SSE  History / Detail
 tool_call ─(gate)───┤                   SSE /api/events         │      (Vite React SPA)
 heartbeat 30s       │◀─ approval_decision ───────────────────────┘
@@ -37,8 +39,12 @@ heartbeat 30s       │◀─ approval_decision ──────────�
   `onTimeout`.
 - **State derivation** (server): pending approval > open turn > idle; heartbeat
   silence (90s) → offline; `session_shutdown` → finished.
+- **Project inspection**: the plugin uploads a bounded relative-path manifest, Git summary, and `git diff --check` findings, never source contents. Immediately before each model request, the server heuristically redacts common PII and secret formats and rechecks model output before persistence. Regex redaction cannot identify every free-form name or address, so use a provider appropriate for the project's data sensitivity.
+- **Inspection budgets and timeouts** (nothing is retried automatically): the model request may spend up to 180s (Settings connection test: 30s); timeouts — including a stalled response body — are reported as actionable errors on the run/inspection. Input is deterministically capped at ~400KB serialized (12 sessions, 400 messages, 100 failed tool calls, 200 known memories, plus a 250-node structure tree whose stable ids the model references as `tree.parentId`); items that no longer fit are dropped whole and reported to the model via `context.omitted`, and serialized JSON is never cut mid-string. Output is capped at 1MB / 400k chars / 20 memories / 300 tree nodes.
+- **Inspection scheduling**: enabling inspections makes idle projects due at the next sweep, interval changes only pull idle projects earlier (never delay an already-due one), and disabling stops future scheduled runs without clearing a live lock — an in-flight inspection finishes and releases its own claim. Failed runs reschedule at the configured interval (not the 10-minute lock TTL), and manual inspection works even while the scheduler is disabled.
 - **Schema**: `users / web_sessions / agent_tokens / projects / sessions / turns /
-  messages / tool_calls / todo_lists+todos (append-only snapshots) / approvals`.
+  messages / tool_calls / todo_lists+todos / approvals / project_snapshots /
+  project_analysis_states / project_inspections / project_memories / model_settings`.
 - **Ownership**: each user creates an Agent Token in the dashboard and exports it
   as `PI_KANBAN_TOKEN` on their own pi machines. Every reported session is then
   bound to that user.
@@ -56,7 +62,7 @@ heartbeat 30s       │◀─ approval_decision ──────────�
 ```bash
 pnpm install
 docker compose up -d db                 # postgres:17
-cp .env.example .env                    # set a strong ADMIN_TOKEN
+cp .env.example .env                    # set ADMIN_TOKEN and MODEL_SETTINGS_SECRET
 pnpm db:push
 pnpm dev:server                         # http://localhost:8787
 pnpm dev:web                            # http://localhost:5173 (proxies /api)
@@ -88,7 +94,13 @@ psql "$DATABASE_URL" -f apps/server/drizzle/0000_multi_user.sql
 pnpm db:push
 ```
 
-New installations only need `pnpm db:push`.
+New installations only need `pnpm db:push`. Existing multi-user installations can apply `apps/server/drizzle/0001_project_memory.sql` directly or run `pnpm db:push`.
+
+Full model inspections have a 180-second request budget; connection tests use 30 seconds. Requests are not automatically retried. Inspection input is bounded to 400 KB before redaction, using whole records and a structure tree rather than the raw file manifest; omission counts describe records removed by that byte budget (database queries also have row caps). Generation is capped at 8,192 tokens and requests up to 40 concise insights. A failed scheduled inspection becomes due again after the configured interval. Saving unchanged settings does not restart every project, and disabling the scheduler does not cancel or unlock an in-flight inspection.
+
+Focused UI regression check: `cd apps/web && node test/run-project-memory.mjs`.
+
+`MODEL_SETTINGS_SECRET` encrypts the global model API key at rest. Keep it stable; changing it makes the saved key unreadable and requires entering the key again in **Settings**.
 
 If you use the local `workflow-guard` extension, remove it — both gates race
 and workflow-guard hard-blocks headless runs before this plugin can escalate.

@@ -428,6 +428,11 @@ h3 {
 	align-items: start;
 }
 
+/* project detail: sessions table yields width to the work rail */
+.board-layout.project-detail {
+	grid-template-columns: minmax(0, 1fr) 420px;
+}
+
 .board-main {
 	min-width: 0;
 }
@@ -624,6 +629,10 @@ font-size: 12px;
 
 	.board-rail {
 		position: static;
+	}
+
+	.rail-group {
+		max-height: none;
 	}
 
 	.board-rail .recent-cards {
@@ -2492,4 +2501,277 @@ overflow: auto;
 	.trj-meta {
 		display: none;
 	}
+}
+
+/* project work rail ------------------------------------------------------------- */
+
+/* one shared bordered group: inspection + memories + tree */
+.rail-group {
+	display: flex;
+	flex-direction: column;
+	max-height: calc(100vh - 32px);
+	background: var(--bg-card);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	box-shadow: var(--shadow-card);
+	overflow: hidden;
+}
+
+.rail-group-item {
+	min-height: 0;
+	border-bottom: 1px solid var(--border);
+}
+
+.rail-group-item:last-child {
+	border-bottom: 0;
+}
+
+.rail-group .rail-card {
+	background: transparent;
+	border-radius: 0;
+	box-shadow: none;
+	flex-shrink: 0;
+}
+
+.rail-group .board-section {
+	margin-bottom: 0;
+	padding: 14px 16px 16px;
+}
+
+/* sections size to content until the group hits max-height; beyond that the
+ * scroll regions shrink (min-height: 0). overflow:hidden + shrink-proof chrome:
+ * a squeezed section must never spill its header/chips onto the next section. */
+.rail-group .memories-section {
+	flex: 0 1 auto;
+	display: flex;
+	flex-direction: column;
+	min-height: 120px;
+	overflow: hidden;
+}
+
+.rail-group .memories-section.is-empty {
+	flex: 0 0 auto;
+	min-height: 0;
+}
+
+.memories-section > header,
+.memories-section > .board-chips {
+	flex-shrink: 0;
+}
+
+.memory-scroll {
+	flex: 0 1 auto;
+	min-height: 0;
+	margin-top: 10px;
+	overflow-y: auto;
+	scrollbar-width: thin;
+}
+
+.memory-group + .memory-group {
+	margin-top: 12px;
+}
+
+.memory-group-title {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 0;
+	font-size: 12px;
+	font-weight: 650;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--fg-faint);
+}
+
+.memory-group-title .count {
+	font-weight: 500;
+	text-transform: none;
+	letter-spacing: 0;
+}
+
+.rail-group .tree-section {
+	flex: 0 1 auto;
+	min-height: 120px;
+	overflow-y: auto;
+	scrollbar-width: thin;
+}
+
+.rail-card > header {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 8px;
+	margin: 0 0 8px;
+	padding: 2px 2px 8px;
+	border-bottom: 1px solid var(--border);
+}
+
+.rail-card > header h2 {
+	margin: 0;
+}
+
+.rail-card .card-meta {
+	margin-top: 8px;
+}
+
+.rail-card > button {
+	margin-top: 10px;
+}
+
+.work-hint {
+	margin: 8px 0 0;
+	font-size: 13px;
+}
+
+.memory-list {
+	display: flex;
+	flex-direction: column;
+	margin: 6px 0 0;
+	padding: 0;
+	list-style: none;
+}
+
+.memory-item {
+	padding: 10px 0;
+	border-bottom: 1px solid var(--border);
+}
+
+.memory-item:last-child {
+	border-bottom: 0;
+	padding-bottom: 2px;
+}
+
+.memory-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.memory-status {
+	margin-left: auto;
+	flex-shrink: 0;
+	font-size: 11px;
+	font-weight: 600;
+	padding: 1px 8px;
+	border-radius: 999px;
+	background: var(--bg-subtle);
+	color: var(--fg-muted);
+}
+
+.memory-status-candidate {
+	color: var(--waiting);
+	background: var(--waiting-bg);
+}
+
+.memory-status-confirmed {
+	color: var(--running);
+	background: var(--running-bg);
+}
+
+.memory-status-pinned {
+	color: var(--accent-strong);
+	background: var(--accent-soft);
+}
+
+.memory-status-archived {
+	color: var(--fg-faint);
+	background: var(--bg-subtle);
+}
+
+.memory-content {
+	margin: 6px 0 0;
+	font-size: 13px;
+	line-height: 1.5;
+	overflow-wrap: anywhere;
+}
+
+.memory-meta {
+	margin: 6px 0 0;
+	font-size: 11px;
+	color: var(--fg-faint);
+}
+
+.memory-evidence {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 6px;
+	margin-top: 6px;
+	font-size: 12px;
+}
+
+.memory-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-top: 8px;
+}
+
+.memory-actions button {
+	padding: 3px 10px;
+	font-size: 12px;
+}
+
+.work-tree {
+	margin: 8px 0 0;
+	padding: 0;
+	list-style: none;
+}
+
+.work-tree .work-tree {
+	margin: 2px 0;
+	padding-left: 14px;
+	border-left: 1px solid var(--border);
+}
+
+.work-tree > li {
+	padding: 4px 0;
+}
+
+.work-node {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	min-width: 0;
+	font-size: 13px;
+}
+
+.work-kind {
+	flex-shrink: 0;
+	font-size: 10px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	background: var(--bg-active);
+	border-radius: 4px;
+	padding: 1px 5px;
+	color: var(--fg-muted);
+}
+
+.work-label {
+	overflow-wrap: anywhere;
+}
+
+.work-node a {
+	font-weight: 500;
+}
+
+.work-node.severity-warning .work-label {
+	color: var(--waiting);
+}
+
+.work-node.severity-error .work-label {
+	color: var(--error);
+}
+
+.work-detail {
+	margin: 2px 0 0;
+	font-size: 12px;
+	color: var(--fg-muted);
+	overflow-wrap: anywhere;
+}
+
+.model-saved {
+	color: var(--accent-strong);
+	font-size: 13px;
 }

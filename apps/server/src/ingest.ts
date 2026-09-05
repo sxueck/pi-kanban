@@ -10,7 +10,9 @@ import {
 	approvals,
 	machines,
 	messages,
+	projectAnalysisStates,
 	projects,
+	projectSnapshots,
 	sessions,
 	todoLists,
 	toolCalls,
@@ -18,6 +20,7 @@ import {
 	turns,
 } from "./db/schema.js";
 import { publish } from "./bus.js";
+import { buildStructureTree } from "./project-tree.js";
 
 export interface ConnContext {
 	machineId: string;
@@ -57,6 +60,9 @@ export async function handleUpstream(
 			return [];
 		case "tool_result":
 			await onToolResult(msg);
+			return [];
+		case "project_snapshot":
+			await onProjectSnapshot(msg, conn);
 			return [];
 		case "todo_snapshot":
 			await onTodoSnapshot(msg);
@@ -306,6 +312,67 @@ async function onToolCall(
 			target: [toolCalls.sessionId, toolCalls.toolCallId],
 		});
 	publish({ type: "session_update", sessionId: msg.sessionId });
+}
+
+async function onProjectSnapshot(
+	msg: Extract<UpstreamMessage, { type: "project_snapshot" }>,
+	conn: ConnContext,
+) {
+	if (!/^[a-f0-9]{64}$/i.test(msg.hash)) throw new Error("invalid project snapshot hash");
+	if (!Array.isArray(msg.files)) throw new Error("invalid project snapshot files");
+	const paths = new Set<string>();
+	const files = msg.files.slice(0, 2_000).flatMap((file) => {
+		if (!file || typeof file.path !== "string" || file.path.length > 500) return [];
+		const normalized = file.path.replaceAll("\\", "/");
+		if (normalized.startsWith("/") || /^[A-Z]:\//i.test(normalized) || normalized.split("/").includes("..") || paths.has(normalized)) return [];
+		paths.add(normalized);
+		return [{ path: normalized, size: typeof file.size === "number" && Number.isFinite(file.size) && file.size >= 0 ? file.size : undefined }];
+	});
+	const createdAtMs = Number.isFinite(msg.createdAt) && msg.createdAt > 0 && msg.createdAt <= 8_640_000_000_000_000
+		? msg.createdAt
+		: Date.now();
+	const [session] = await db
+		.select({ projectId: sessions.projectId })
+		.from(sessions)
+		.where(and(eq(sessions.id, msg.sessionId), eq(sessions.userId, conn.userId)))
+		.limit(1);
+	if (!session?.projectId) throw new Error("snapshot session has no project");
+	const [project] = await db.select({ name: projects.name }).from(projects).where(eq(projects.id, session.projectId)).limit(1);
+	if (!project) throw new Error("snapshot project not found");
+	await db
+		.insert(projectSnapshots)
+		.values({
+			userId: conn.userId,
+			projectId: session.projectId,
+			sessionId: msg.sessionId,
+			snapshotHash: msg.hash,
+			files,
+			git: {
+				head: typeof msg.git?.head === "string" ? msg.git.head.slice(0, 200) : undefined,
+				status: Array.isArray(msg.git?.status) ? msg.git.status.slice(0, 200).map((line) => String(line).slice(0, 500)) : [],
+			},
+			diagnostics: Array.isArray(msg.diagnostics) ? msg.diagnostics.slice(0, 100).map((line) => String(line).slice(0, 500)) : [],
+			truncated: msg.truncated === true || msg.files.length > files.length,
+			createdAt: new Date(createdAtMs),
+		})
+		.onConflictDoNothing({ target: [projectSnapshots.userId, projectSnapshots.projectId, projectSnapshots.snapshotHash] });
+	await db
+		.insert(projectAnalysisStates)
+		.values({
+			userId: conn.userId,
+			projectId: session.projectId,
+			nextInspectionAt: new Date(),
+			latestTree: buildStructureTree(files, project.name),
+		})
+		.onConflictDoUpdate({
+			target: [projectAnalysisStates.userId, projectAnalysisStates.projectId],
+			set: {
+				nextInspectionAt: new Date(),
+				latestTree: buildStructureTree(files, project.name),
+				updatedAt: new Date(),
+			},
+		});
+	publish({ type: "project_update", userId: conn.userId, projectId: session.projectId });
 }
 
 async function onToolResult(

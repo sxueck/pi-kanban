@@ -5,6 +5,7 @@ import { serve } from "@hono/node-server";
 import { api } from "./api.js";
 import { agentWss, handleUpgrade } from "./ws.js";
 import { sweepExpiredApprovals, sweepOfflineSessions } from "./approvals.js";
+import { runDueInspections } from "./inspector.js";
 
 const rootEnvFile = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../.env");
 if (existsSync(rootEnvFile)) process.loadEnvFile(rootEnvFile);
@@ -29,6 +30,9 @@ const SWEEP_INTERVAL_MS = 30_000;
 const sweeper = setInterval(() => {
 	void sweepExpiredApprovals();
 	void sweepOfflineSessions();
+	void runDueInspections().catch((error) => {
+		console.error("[pi-kanban] inspection sweep failed:", error instanceof Error ? error.message : error);
+	});
 }, SWEEP_INTERVAL_MS);
 sweeper.unref();
 
