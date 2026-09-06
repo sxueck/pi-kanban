@@ -10,6 +10,8 @@ import type {
 	BoardSession,
 	DailyStatDTO,
 	HistorySessionDTO,
+	InspectionLogDetailDTO,
+	InspectionLogSummaryDTO,
 	LifetimeStatDTO,
 	ModelSettingsInput,
 	ProjectHistoryDTO,
@@ -27,6 +29,8 @@ import {
 	approvals,
 	messages,
 	projectAnalysisStates,
+	projectInspections,
+	projectInspectionLogs,
 	projectMemories,
 	projects,
 	projectSnapshots,
@@ -63,13 +67,15 @@ import {
 	saveModelSettings,
 	toModelSettingsDto,
 } from "./model-settings.js";
-import { CONNECTION_TEST_TIMEOUT_MS, requestInspection } from "./model.js";
+import { CONNECTION_TEST_TIMEOUT_MS, requestInspection, SYSTEM_PROMPT } from "./model.js";
 import {
 	ensureProjectAnalysisState,
 	INSPECTION_LOCK_TTL_MS,
 	queueProjectInspection,
+	RETAINED_INSPECTION_LOGS,
 	toMemoryDto,
 } from "./inspector.js";
+import { getLiveInspection, subscribeInspectionLive, type InspectionLiveEvent } from "./inspection-live.js";
 
 type AppEnv = { Variables: { auth: AuthUser } };
 export const api = new Hono<AppEnv>();
@@ -147,8 +153,13 @@ api.post("/api/auth/login", async (c) => {
 	return c.json({ token, user: { id: user.id, username: user.username, role: user.role } });
 });
 
+/** EventSource cannot set request headers — these SSE endpoints accept the web token as ?token=. */
+function acceptsQueryToken(path: string): boolean {
+	return path === "/api/events" || path.endsWith("/inspection-log/stream");
+}
+
 api.use("/api/*", async (c, next) => {
-	const token = bearerToken(c.req.header("authorization")) ?? (c.req.path === "/api/events" ? c.req.query("token") : undefined);
+	const token = bearerToken(c.req.header("authorization")) ?? (acceptsQueryToken(c.req.path) ? c.req.query("token") : undefined);
 	if (!token) return c.json({ error: "unauthorized" }, 401);
 	const user = await authenticateWebToken(token);
 	if (!user) return c.json({ error: "unauthorized" }, 401);
@@ -339,6 +350,8 @@ api.get("/api/stats/total", async (c) => {
 		.select({
 			totalCostUsd: sql<number>`coalesce(sum(${sessions.totalCostUsd}), 0)::float8`,
 			totalTokens: sql<number>`coalesce(sum(${sessions.totalTokens}), 0)::float8`,
+			totalProjects: sql<number>`count(distinct ${sessions.projectId})::int`,
+			totalSessions: sql<number>`count(*)::int`,
 		})
 		.from(sessions)
 		.where(eq(sessions.userId, currentUser(c).id));
@@ -589,6 +602,141 @@ api.post("/api/projects/:id/inspect", async (c) => {
 	}
 });
 
+api.get("/api/projects/:id/inspection-logs", async (c) => {
+	const projectId = Number(c.req.param("id"));
+	if (!Number.isInteger(projectId)) return c.json({ error: "bad project id" }, 400);
+	const userId = currentUser(c).id;
+	const [owned] = await db.select({ id: projects.id }).from(projects)
+		.innerJoin(sessions, and(eq(sessions.projectId, projects.id), eq(sessions.userId, userId)))
+		.where(eq(projects.id, projectId)).limit(1);
+	if (!owned) return c.json({ error: "project not found" }, 404);
+	const rows = await db.select({
+		inspectionId: projectInspections.id,
+		trigger: projectInspections.trigger,
+		status: projectInspections.status,
+		startedAt: projectInspections.startedAt,
+		finishedAt: projectInspections.finishedAt,
+		redactionCount: projectInspections.redactionCount,
+		error: projectInspections.error,
+		// Presence flags only — the transcript texts can reach ~800KB per run and
+		// are fetched by the detail endpoint on demand.
+		hasResponse: sql<boolean>`(${projectInspectionLogs.responseContent} is not null)`,
+		hasReasoning: sql<boolean>`(${projectInspectionLogs.reasoningContent} is not null)`,
+	}).from(projectInspectionLogs)
+		.innerJoin(projectInspections, eq(projectInspections.id, projectInspectionLogs.inspectionId))
+		.where(and(eq(projectInspections.userId, userId), eq(projectInspections.projectId, projectId)))
+		.orderBy(desc(projectInspections.startedAt))
+		.limit(RETAINED_INSPECTION_LOGS);
+	const logs: InspectionLogSummaryDTO[] = rows.map((row) => ({
+		inspectionId: row.inspectionId,
+		trigger: row.trigger as "manual" | "schedule",
+		status: row.status,
+		startedAt: row.startedAt.getTime(),
+		finishedAt: row.finishedAt?.getTime(),
+		redactionCount: row.redactionCount,
+		hasResponse: Boolean(row.hasResponse),
+		hasReasoning: Boolean(row.hasReasoning),
+		error: row.error ?? undefined,
+	}));
+	return c.json(logs);
+});
+
+api.get("/api/projects/:id/inspection-logs/:inspectionId", async (c) => {
+	const projectId = Number(c.req.param("id"));
+	if (!Number.isInteger(projectId)) return c.json({ error: "bad project id" }, 400);
+	const inspectionId = c.req.param("inspectionId");
+	if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(inspectionId)) {
+		return c.json({ error: "bad inspection id" }, 400);
+	}
+	const userId = currentUser(c).id;
+	const [row] = await db.select({
+		trigger: projectInspections.trigger,
+		status: projectInspections.status,
+		startedAt: projectInspections.startedAt,
+		finishedAt: projectInspections.finishedAt,
+		redactionCount: projectInspections.redactionCount,
+		error: projectInspections.error,
+		requestPayload: projectInspectionLogs.requestPayload,
+		responseContent: projectInspectionLogs.responseContent,
+		reasoningContent: projectInspectionLogs.reasoningContent,
+	}).from(projectInspectionLogs)
+		.innerJoin(projectInspections, eq(projectInspections.id, projectInspectionLogs.inspectionId))
+		.where(and(
+			eq(projectInspections.userId, userId),
+			eq(projectInspections.projectId, projectId),
+			eq(projectInspectionLogs.inspectionId, inspectionId),
+		)).limit(1);
+	if (!row) return c.json({ error: "log not found" }, 404);
+	const detail: InspectionLogDetailDTO = {
+		inspection: {
+			inspectionId,
+			trigger: row.trigger as "manual" | "schedule",
+			status: row.status,
+			startedAt: row.startedAt.getTime(),
+			finishedAt: row.finishedAt?.getTime(),
+			redactionCount: row.redactionCount,
+			hasResponse: row.responseContent != null,
+			hasReasoning: row.reasoningContent != null,
+			error: row.error ?? undefined,
+		},
+		systemPrompt: SYSTEM_PROMPT,
+		requestPayload: row.requestPayload,
+		responseContent: row.responseContent ?? undefined,
+		reasoningContent: row.reasoningContent ?? undefined,
+	};
+	return c.json(detail);
+});
+
+api.get("/api/projects/:id/inspection-log/stream", (c) => {
+	const projectId = Number(c.req.param("id"));
+	if (!Number.isInteger(projectId)) return c.json({ error: "bad project id" }, 400);
+	const userId = currentUser(c).id;
+	return streamSSE(c, async (stream) => {
+		// Ownership check runs inside the stream: the handshake already answered 200.
+		const [owned] = await db.select({ id: projects.id }).from(projects)
+			.innerJoin(sessions, and(eq(sessions.projectId, projects.id), eq(sessions.userId, userId)))
+			.where(eq(projects.id, projectId)).limit(1);
+		if (!owned) {
+			await stream.writeSSE({ event: "error", data: "project not found" });
+			return;
+		}
+		let closed = false;
+		stream.onAbort(() => {
+			closed = true;
+		});
+		const sseEvent = (e: InspectionLiveEvent): { event: string; data: string } => ({
+			event: "stage" in e ? "stage" : "type" in e ? "delta" : "snapshot",
+			data: JSON.stringify(e),
+		});
+		// Events replayed synchronously during subscribe land in the buffer so the
+		// run envelope is always written before its stages/snapshot.
+		const buffered: InspectionLiveEvent[] = [];
+		let flushing = false;
+		const unsubscribe = subscribeInspectionLive(projectId, (e) => {
+			if (closed) return;
+			if (flushing) void stream.writeSSE(sseEvent(e));
+			else buffered.push(e);
+		});
+		try {
+			const live = getLiveInspection(projectId);
+			await stream.writeSSE({
+				event: "run",
+				data: JSON.stringify(live ? { running: live.running, inspectionId: live.inspectionId, trigger: live.trigger, startedAt: live.startedAt } : { running: false }),
+			});
+			for (const e of buffered) await stream.writeSSE(sseEvent(e));
+			buffered.length = 0;
+			flushing = true;
+			while (!closed) {
+				await stream.writeSSE({ event: "ping", data: "" });
+				await stream.sleep(25_000);
+			}
+		} finally {
+			closed = true;
+			unsubscribe();
+		}
+	});
+});
+
 api.post("/api/projects/:id/memories/:memoryId/status", async (c) => {
 	const projectId = Number(c.req.param("id"));
 	if (!Number.isInteger(projectId)) return c.json({ error: "bad project id" }, 400);
@@ -621,6 +769,7 @@ api.post("/api/projects/:id/memories/:memoryId/status", async (c) => {
 				kind: current.kind,
 				content: current.content,
 				status: body.status as ProjectMemoryStatus,
+				moduleIds: current.moduleIds,
 				evidence: current.evidence,
 				sourceInspectionId: current.sourceInspectionId,
 			}).returning();

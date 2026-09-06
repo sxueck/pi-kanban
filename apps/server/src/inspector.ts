@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, inArray, isNull, lt, lte, or } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type {
+	InspectionSchedule,
 	ProjectMemoryDTO,
 	ProjectMemoryKind,
 	ProjectMemoryStatus,
 	ProjectTreeNodeDTO,
 } from "@pi-kanban/shared";
+import { computeNextInspectionAt } from "@pi-kanban/shared";
 import { publish } from "./bus.js";
 import { db } from "./db/index.js";
 import {
@@ -13,6 +15,7 @@ import {
 	modelSettings,
 	projectAnalysisStates,
 	projectInspections,
+	projectInspectionLogs,
 	projectMemories,
 	projects,
 	projectSnapshots,
@@ -20,12 +23,21 @@ import {
 	toolCalls,
 	turns,
 } from "./db/schema.js";
-import { decryptApiKey, readModelSettings } from "./model-settings.js";
-import { FULL_INSPECTION_TIMEOUT_MS, requestInspection, type ModelInspectionResult } from "./model.js";
+import { decryptApiKey, readModelSettings, toInspectionSchedule } from "./model-settings.js";
+import { recordInspectionDelta, recordInspectionStage } from "./inspection-live.js";
+import { FULL_INSPECTION_TIMEOUT_MS, requestInspectionStreaming, type ModelInspectionResult } from "./model.js";
 import { buildStructureTree, mergeProjectTree } from "./project-tree.js";
 import { redactForModel, redactText, type Redactable } from "./redact.js";
 
-export const INSPECTION_LOCK_TTL_MS = 10 * 60_000;
+export const MAX_INSPECTION_BATCHES = 4;
+const SESSIONS_PER_INSPECTION_BATCH = 3;
+/**
+ * A run may use four sequential ten-minute model requests. Leave an extra
+ * batch of slack so a live claim cannot be reclaimed while it is completing.
+ */
+export const INSPECTION_LOCK_TTL_MS = (MAX_INSPECTION_BATCHES + 1) * FULL_INSPECTION_TIMEOUT_MS;
+/** Newest full transcripts kept per project; older runs keep only their metadata row. */
+export const RETAINED_INSPECTION_LOGS = 10;
 const SESSION_LIMIT = 12;
 const MESSAGE_LIMIT = 400;
 const TOOL_LIMIT = 100;
@@ -71,11 +83,11 @@ export interface InspectionOmissions {
  */
 export function assembleInspectionInput(
 	sections: InspectionInputSections,
-	options: { maxBytes?: number } = {},
+	options: { maxBytes?: number; batch?: { index: number; total: number } } = {},
 ) {
 	const maxBytes = options.maxBytes ?? MAX_INPUT_BYTES;
 	const budget = maxBytes - INPUT_WRAPPER_RESERVE;
-	const base: Record<string, unknown> = {
+	const base = {
 		project: sections.project,
 		snapshot: sections.snapshot,
 		structureTree: sections.structureTree.map((node) => ({
@@ -113,8 +125,47 @@ export function assembleInspectionInput(
 		messages: take(sections.messages, "messages"),
 		failedTools: take(sections.failedTools, "failedTools"),
 		knownMemories: take(sections.knownMemories, "knownMemories"),
-		context: { limits: INPUT_LIMITS, omitted: omissions },
+		context: {
+			limits: INPUT_LIMITS,
+			omitted: omissions,
+			...(options.batch ? { batch: options.batch } : {}),
+		},
 	};
+}
+
+export function splitInspectionBatches(sections: InspectionInputSections): InspectionInputSections[] {
+	if (sections.sessions.length <= SESSIONS_PER_INSPECTION_BATCH) return [sections];
+	const batches: InspectionInputSections[] = [];
+	for (let offset = 0; offset < sections.sessions.length; offset += SESSIONS_PER_INSPECTION_BATCH) {
+		const sessions = sections.sessions.slice(offset, offset + SESSIONS_PER_INSPECTION_BATCH);
+		const sessionIds = new Set(sessions.flatMap((session) => typeof session.id === "string" ? [session.id] : []));
+		batches.push({
+			...sections,
+			sessions,
+			messages: sections.messages.filter((message) => sessionIds.has(String(message.sessionId))),
+			failedTools: sections.failedTools.filter((tool) => sessionIds.has(String(tool.sessionId))),
+		});
+	}
+	return batches;
+}
+
+export function mergeInspectionResults(results: ModelInspectionResult[]): ModelInspectionResult {
+	const seenMemories = new Set<string>();
+	const memories: ModelInspectionResult["memories"] = [];
+	const tree: ModelInspectionResult["tree"] = [];
+	for (const [batchIndex, result] of results.entries()) {
+		for (const memory of result.memories) {
+			const key = normalizeMemory(memory.content);
+			if (!seenMemories.has(key)) {
+				seenMemories.add(key);
+				memories.push(memory);
+			}
+		}
+		for (const [nodeIndex, node] of result.tree.entries()) {
+			tree.push({ ...node, id: `insight:${batchIndex}:${nodeIndex}` });
+		}
+	}
+	return { memories, tree };
 }
 
 export async function ensureProjectAnalysisState(userId: string, projectId: number): Promise<void> {
@@ -130,13 +181,13 @@ export async function ensureProjectAnalysisState(userId: string, projectId: numb
  */
 export function toInspectionConnection(
 	settings: typeof modelSettings.$inferSelect | undefined,
-): { baseUrl: string; model: string; apiKeyCipher: string; intervalMinutes: number } | null {
+): { baseUrl: string; model: string; apiKeyCipher: string; schedule: InspectionSchedule } | null {
 	if (!settings?.baseUrl || !settings.model || !settings.apiKeyCipher) return null;
 	return {
 		baseUrl: settings.baseUrl,
 		model: settings.model,
 		apiKeyCipher: settings.apiKeyCipher,
-		intervalMinutes: settings.inspectionIntervalMinutes,
+		schedule: toInspectionSchedule(settings),
 	};
 }
 
@@ -153,7 +204,7 @@ export async function queueProjectInspection(
 	const staleBefore = new Date(now.getTime() - INSPECTION_LOCK_TTL_MS);
 	// The claim-time nextInspectionAt is only a crash guard (a stuck lock stops
 	// looking due after one TTL); success and failure both reschedule using the
-	// configured interval below.
+	// configured schedule below.
 	const nextInspectionAt = new Date(now.getTime() + INSPECTION_LOCK_TTL_MS);
 	const [claimed] = await db
 		.update(projectAnalysisStates)
@@ -175,12 +226,12 @@ export async function queueProjectInspection(
 	} catch (error) {
 		// The run row could not be created: release the claim we just took
 		// (guarded by our own lockedAt) instead of parking the project for a
-		// full lock TTL, and reschedule at the configured interval.
+		// full lock TTL, and reschedule at the configured schedule's next slot.
 		await db
 			.update(projectAnalysisStates)
 			.set({
 				lockedAt: null,
-				nextInspectionAt: new Date(now.getTime() + connection.intervalMinutes * 60_000),
+				nextInspectionAt: computeNextInspectionAt(connection.schedule, now),
 				updatedAt: now,
 			})
 			.where(and(
@@ -190,7 +241,7 @@ export async function queueProjectInspection(
 			));
 		throw error;
 	}
-	void executeInspection(runId, userId, projectId, connection.intervalMinutes, {
+	void executeInspection(runId, userId, projectId, trigger, connection.schedule, {
 		baseUrl: connection.baseUrl,
 		model: connection.model,
 		apiKey,
@@ -230,31 +281,104 @@ async function executeInspection(
 	runId: string,
 	userId: string,
 	projectId: number,
-	intervalMinutes: number,
+	trigger: "manual" | "schedule",
+	schedule: InspectionSchedule,
 	connection: { baseUrl: string; model: string; apiKey: string },
 	claimedAt: Date,
 ): Promise<void> {
+	const startedMs = Date.now();
+	// Payloads survive the try scope so a failed batch still leaves a transcript.
+	const logPayloads: unknown[] = [];
 	try {
-		const input = await buildInspectionInput(userId, projectId);
-		const redactedInput = redactForModel(input);
-		const rawResult = await requestInspection(connection, redactedInput.value, {
-			timeoutMs: FULL_INSPECTION_TIMEOUT_MS,
-			purpose: "model inspection",
+		const sections = await buildInspectionSections(userId, projectId);
+		const batches = splitInspectionBatches(sections);
+		if (batches.length > MAX_INSPECTION_BATCHES) {
+			throw new Error(`inspection exceeded the ${MAX_INSPECTION_BATCHES} batch limit`);
+		}
+		const responses = [];
+		let inputRedactions = 0;
+		for (const [batchOffset, batch] of batches.entries()) {
+			const batchNumber = batchOffset + 1;
+			const input = toRedactable(assembleInspectionInput(batch, { batch: { index: batchNumber, total: batches.length } }));
+			const redactedInput = redactForModel(input);
+			logPayloads.push(redactedInput.value);
+			inputRedactions += redactedInput.count;
+			recordInspectionStage(projectId, trigger, {
+				stage: "assembled",
+				inspectionId: runId,
+				bytes: byteSize(redactedInput.value),
+				redactions: redactedInput.count,
+				omitted: omittedCounts(redactedInput.value),
+			});
+			recordInspectionStage(projectId, trigger, {
+				stage: "request_sent",
+				inspectionId: runId,
+				model: connection.model,
+				timeoutMs: FULL_INSPECTION_TIMEOUT_MS,
+			});
+			if (batches.length > 1) {
+				recordInspectionDelta(projectId, runId, { type: "content", text: `\n\n--- batch ${batchNumber}/${batches.length} ---\n` });
+			}
+			responses.push(await requestInspectionStreaming(connection, redactedInput.value, {
+				timeoutMs: FULL_INSPECTION_TIMEOUT_MS,
+				purpose: `model inspection batch ${batchNumber}/${batches.length}`,
+				onDelta: (delta) => recordInspectionDelta(projectId, runId, delta),
+			}));
+		}
+		const mergedResult = mergeInspectionResults(responses.map((response) => response.result));
+		const redactedResult = redactInspectionResult(mergedResult);
+		const responseTranscripts: Array<{ batch: number; content: string; reasoning?: string; redactions: number }> = responses.map((response, batchOffset) => {
+			const content = redactText(response.content);
+			const reasoning = response.reasoning == null ? undefined : redactText(response.reasoning);
+			return {
+				batch: batchOffset + 1,
+				content: content.value,
+				reasoning: reasoning?.value,
+				redactions: content.count + (reasoning?.count ?? 0),
+			};
 		});
-		const redactedResult = redactInspectionResult(rawResult);
-		await persistInspectionResult(runId, userId, projectId, intervalMinutes, redactedResult.value, redactedInput.count + redactedResult.count, claimedAt);
+		const reasoningTranscripts: Array<{ batch: number; reasoning: string }> = [];
+		for (const transcript of responseTranscripts) {
+			if (transcript.reasoning != null) reasoningTranscripts.push({ batch: transcript.batch, reasoning: transcript.reasoning });
+		}
+		const transcriptRedactions = responseTranscripts.reduce((total, transcript) => total + transcript.redactions, 0);
+		await persistInspectionResult(runId, userId, projectId, schedule, redactedResult.value, inputRedactions + redactedResult.count + transcriptRedactions, claimedAt, {
+			requestPayload: { batches: logPayloads },
+			responseContent: JSON.stringify(responseTranscripts.map(({ batch, content }) => ({ batch, content }))),
+			reasoningContent: reasoningTranscripts.length > 0 ? JSON.stringify(reasoningTranscripts) : undefined,
+		});
+		recordInspectionStage(projectId, trigger, {
+			stage: "succeeded",
+			inspectionId: runId,
+			memories: redactedResult.value.memories.length,
+			treeNodes: redactedResult.value.tree.length,
+			elapsedMs: Date.now() - startedMs,
+		});
 	} catch (error) {
 		const failedAt = new Date();
 		const message = redactText(error instanceof Error ? error.message : String(error)).value.slice(0, 1000);
+		if (logPayloads.length > 0) {
+			// Best-effort transcript for a failed run; the metadata write below is the source of truth.
+			await db.insert(projectInspectionLogs).values({ inspectionId: runId, requestPayload: { batches: logPayloads } })
+				.onConflictDoNothing().catch(() => undefined);
+			await pruneInspectionLogs(userId, projectId).catch(() => undefined);
+		}
+		recordInspectionStage(projectId, trigger, {
+			stage: "failed",
+			inspectionId: runId,
+			error: message,
+			elapsedMs: Date.now() - startedMs,
+		});
 		await Promise.all([
 			db.update(projectInspections).set({ status: "failed", error: message, finishedAt: failedAt }).where(eq(projectInspections.id, runId)),
 			// Release the lock and reschedule the retry at the configured
-			// interval (never the lock TTL). The lockedAt guard keeps a stale
-			// run from clearing a newer claim that took over after this lock expired.
+			// schedule's next slot (never the lock TTL). The lockedAt guard keeps
+			// a stale run from clearing a newer claim that took over after this
+			// lock expired.
 			db.update(projectAnalysisStates).set({
 				lockedAt: null,
 				lastError: message,
-				nextInspectionAt: new Date(failedAt.getTime() + intervalMinutes * 60_000),
+				nextInspectionAt: computeNextInspectionAt(schedule, failedAt),
 				updatedAt: failedAt,
 			}).where(and(
 				eq(projectAnalysisStates.userId, userId),
@@ -266,7 +390,7 @@ async function executeInspection(
 	}
 }
 
-async function buildInspectionInput(userId: string, projectId: number): Promise<Redactable> {
+async function buildInspectionSections(userId: string, projectId: number): Promise<InspectionInputSections> {
 	const [projectRows, snapshotRows, sessionRows, memoryRows] = await Promise.all([
 		db.select({ name: projects.name, gitRemote: projects.gitRemote }).from(projects).where(eq(projects.id, projectId)).limit(1),
 		db.select().from(projectSnapshots).where(and(eq(projectSnapshots.userId, userId), eq(projectSnapshots.projectId, projectId))).orderBy(desc(projectSnapshots.createdAt)).limit(1),
@@ -287,7 +411,7 @@ async function buildInspectionInput(userId: string, projectId: number): Promise<
 	// structure tree carries the same layout plus the stable node ids the
 	// model must reference in tree parentId fields.
 	const structureTree = buildStructureTree(files, projectRows[0].name);
-	return toRedactable(assembleInspectionInput({
+	return {
 		project: projectRows[0],
 		snapshot: snapshot ? {
 			fileCount: files.length,
@@ -300,17 +424,18 @@ async function buildInspectionInput(userId: string, projectId: number): Promise<
 		messages: messageRows,
 		failedTools,
 		knownMemories: memoryRows,
-	}));
+	};
 }
 
 async function persistInspectionResult(
 	runId: string,
 	userId: string,
 	projectId: number,
-	intervalMinutes: number,
+	schedule: InspectionSchedule,
 	result: ModelInspectionResult,
 	redactionCount: number,
 	claimedAt: Date,
+	log: { requestPayload: unknown; responseContent: string; reasoningContent?: string },
 ): Promise<void> {
 	const [projectRow, snapshotRow, existingRows] = await Promise.all([
 		db.select({ name: projects.name }).from(projects).where(eq(projects.id, projectId)).limit(1),
@@ -326,9 +451,11 @@ async function persistInspectionResult(
 	const validEvidence = (entry: { sessionId: string; turnPosition?: number }) =>
 		allowedSessions.has(entry.sessionId) && (entry.turnPosition === undefined || allowedTurns.has(`${entry.sessionId}:${entry.turnPosition}`));
 	const existing = new Set(existingRows.map((row) => normalizeMemory(row.content)));
-	const candidates = result.memories.filter((memory) => !existing.has(normalizeMemory(memory.content)));
 	const files = asSnapshotFiles(snapshotRow[0]?.files);
 	const structure = buildStructureTree(files, projectRow[0]?.name ?? "Project");
+	const structureIds = new Set(structure.map((node) => node.id));
+	const memories = retainStructureModuleIds(result.memories, structureIds);
+	const candidates = memories.filter((memory) => !existing.has(normalizeMemory(memory.content)));
 	const tree = mergeProjectTree(structure, result.tree.filter((node) => !node.sessionId || validEvidence({ sessionId: node.sessionId, turnPosition: node.turnPosition })));
 	const now = new Date();
 	await db.transaction(async (tx) => {
@@ -346,6 +473,7 @@ async function persistInspectionResult(
 				kind: memory.kind,
 				content: memory.content,
 				status: "candidate",
+				moduleIds: memory.moduleIds,
 				evidence: memory.evidence.filter(validEvidence),
 				sourceInspectionId: runId,
 			})));
@@ -357,7 +485,7 @@ async function persistInspectionResult(
 			latestTree: tree,
 			lockedAt: null,
 			lastInspectionAt: now,
-			nextInspectionAt: new Date(now.getTime() + intervalMinutes * 60_000),
+			nextInspectionAt: computeNextInspectionAt(schedule, now),
 			lastError: null,
 			updatedAt: now,
 		}).where(and(
@@ -366,8 +494,53 @@ async function persistInspectionResult(
 			eq(projectAnalysisStates.lockedAt, claimedAt),
 		));
 		await tx.update(projectInspections).set({ status: "done", redactionCount, finishedAt: now }).where(eq(projectInspections.id, runId));
+		await tx.insert(projectInspectionLogs).values({
+			inspectionId: runId,
+			requestPayload: log.requestPayload,
+			responseContent: log.responseContent,
+			reasoningContent: log.reasoningContent,
+		}).onConflictDoNothing({ target: projectInspectionLogs.inspectionId });
 	});
+	await pruneInspectionLogs(userId, projectId);
 	publish({ type: "project_update", userId, projectId });
+}
+
+/** Keeps only the newest RETAINED_INSPECTION_LOGS transcripts per project; run metadata rows are untouched. */
+async function pruneInspectionLogs(userId: string, projectId: number): Promise<void> {
+	await db.execute(sql`
+		DELETE FROM project_inspection_logs
+		WHERE inspection_id IN (
+			SELECT l.inspection_id
+			FROM project_inspection_logs l
+			JOIN project_inspections i ON i.id = l.inspection_id
+			WHERE i.user_id = ${userId} AND i.project_id = ${projectId}
+			ORDER BY i.started_at DESC
+			OFFSET ${RETAINED_INSPECTION_LOGS}
+		)
+	`);
+}
+
+function byteSize(value: unknown): number {
+	try {
+		return Buffer.byteLength(JSON.stringify(value) ?? "");
+	} catch {
+		return 0;
+	}
+}
+
+function omittedCounts(payload: unknown): Record<string, number> {
+	const omitted = (payload as { context?: { omitted?: unknown } } | null)?.context?.omitted;
+	return omitted && typeof omitted === "object" ? { ...(omitted as Record<string, number>) } : {};
+}
+
+export function retainStructureModuleIds(
+	memories: ModelInspectionResult["memories"],
+	structureIds: Set<string>,
+): ModelInspectionResult["memories"] {
+	return memories.map((memory) => ({
+		...memory,
+		moduleIds: [...new Set(memory.moduleIds.filter((id) => structureIds.has(id)))].slice(0, 3),
+	}));
 }
 
 export function toMemoryDto(row: typeof projectMemories.$inferSelect): ProjectMemoryDTO {
@@ -377,6 +550,7 @@ export function toMemoryDto(row: typeof projectMemories.$inferSelect): ProjectMe
 		kind: row.kind as ProjectMemoryKind,
 		content: row.content,
 		status: row.status as ProjectMemoryStatus,
+		moduleIds: asModuleIds(row.moduleIds),
 		evidence: asEvidence(row.evidence),
 		createdAt: row.createdAt.getTime(),
 	};
@@ -407,6 +581,11 @@ function asSnapshotFiles(value: unknown): Array<{ path: string; size?: number }>
 		if (typeof item.path !== "string") return [];
 		return [{ path: item.path, size: typeof item.size === "number" ? item.size : undefined }];
 	});
+}
+
+function asModuleIds(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	return [...new Set(value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0))].slice(0, 3);
 }
 
 function asEvidence(value: unknown): Array<{ sessionId: string; turnPosition?: number }> {

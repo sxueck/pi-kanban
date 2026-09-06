@@ -13,6 +13,7 @@ import type {
 import { apiErrorMessage, apiPost, fmtCost, fmtTime, useResource } from "../api.js";
 import { useI18n } from "../i18n.js";
 import type { MsgKey } from "../i18n.js";
+import { InspectionLogPanel } from "./InspectionLogs.js";
 import { EmptyHistoryIllustration } from "../components/illustrations.js";
 
 export function History() {
@@ -60,6 +61,8 @@ export function ProjectSessions() {
 	const pendingRequests = useRef(new Set<string>());
 	const [pendingMemories, setPendingMemories] = useState<Set<string>>(new Set());
 	const [updatedMemories, setUpdatedMemories] = useState<Record<string, ProjectMemoryDTO>>({});
+	const [selectedModuleId, setSelectedModuleId] = useState<string | null>(null);
+	const [showLogs, setShowLogs] = useState(false);
 	const { data: sessions, error: sessionsError } = useResource<HistorySessionDTO[]>(
 		id ? `/api/projects/${id}/sessions` : null,
 	);
@@ -67,6 +70,11 @@ export function ProjectSessions() {
 		id ? `/api/projects/${id}/work` : null,
 		refreshKey,
 	);
+	const memories = work?.memories.map((memory) => {
+		const updated = updatedMemories[memory.id];
+		return updated && updated.version > memory.version ? updated : memory;
+	}) ?? [];
+	const selectedModule = work?.tree.find((node) => node.id === selectedModuleId && node.kind === "module");
 
 	async function setStatus(memoryId: string, status: ProjectMemoryStatus) {
 		if (!id || pendingRequests.current.has(memoryId)) return;
@@ -107,39 +115,44 @@ export function ProjectSessions() {
 					{work && <p className="muted">{work.project.name}</p>}
 				</header>
 				{sessionsError && <div className="error">{apiErrorMessage(sessionsError)}</div>}
-				{!sessionsError && !sessions && <div className="empty">{t("common.loading")}</div>}
-				{sessions && sessions.length === 0 && (
-					<div className="empty">
-						<h2>{t("sessions.empty")}</h2>
-						<p>{t("sessions.emptyHint")}</p>
+				<div className={`project-work-main${work ? " has-tree" : ""}`}>
+					{work && <TreeCard nodes={work.tree} selectedNodeId={selectedModule?.id} onSelect={setSelectedModuleId} />}
+					<div className="project-sessions">
+						{!sessionsError && !sessions && <div className="empty">{t("common.loading")}</div>}
+						{sessions && sessions.length === 0 && (
+							<div className="empty">
+								<h2>{t("sessions.empty")}</h2>
+								<p>{t("sessions.emptyHint")}</p>
+							</div>
+						)}
+						{sessions && sessions.length > 0 && (
+							<table className="table">
+								<thead>
+									<tr>
+										<th>{t("th.title")}</th>
+										<th>{t("th.state")}</th>
+										<th>{t("th.turns")}</th>
+										<th>{t("th.cost")}</th>
+										<th>{t("th.started")}</th>
+									</tr>
+								</thead>
+								<tbody>
+									{sessions.map((s) => (
+										<tr key={s.id}>
+											<td>
+												<Link to={`/sessions/${s.id}`}>{s.title ?? s.id}</Link>
+											</td>
+											<td className={`status-${s.state}`}>{t(`state.${s.state}` as MsgKey)}</td>
+											<td>{s.turnCount}</td>
+											<td>{fmtCost(s.totalCostUsd)}</td>
+											<td>{fmtTime(s.startedAt)}</td>
+										</tr>
+									))}
+								</tbody>
+							</table>
+						)}
 					</div>
-				)}
-				{sessions && sessions.length > 0 && (
-					<table className="table">
-						<thead>
-							<tr>
-								<th>{t("th.title")}</th>
-								<th>{t("th.state")}</th>
-								<th>{t("th.turns")}</th>
-								<th>{t("th.cost")}</th>
-								<th>{t("th.started")}</th>
-							</tr>
-						</thead>
-						<tbody>
-							{sessions.map((s) => (
-								<tr key={s.id}>
-									<td>
-										<Link to={`/sessions/${s.id}`}>{s.title ?? s.id}</Link>
-									</td>
-									<td className={`status-${s.state}`}>{t(`state.${s.state}` as MsgKey)}</td>
-									<td>{s.turnCount}</td>
-									<td>{fmtCost(s.totalCostUsd)}</td>
-									<td>{fmtTime(s.startedAt)}</td>
-								</tr>
-							))}
-						</tbody>
-					</table>
-				)}
+				</div>
 			</div>
 			<aside className="board-rail">
 				{workError && <div className="error">{apiErrorMessage(workError)}</div>}
@@ -147,35 +160,45 @@ export function ProjectSessions() {
 				{actionError && <div className="error">{actionError}</div>}
 				{work && (
 					<div className="rail-group">
-						<InspectionCard
-							inspection={work.inspection}
-							snapshotUpdatedAt={work.snapshotUpdatedAt}
-							busy={inspecting}
-							onInspect={() => void inspectNow()}
-						/>
-						<MemoriesCard
-							memories={work.memories.map((memory) => {
-								const updated = updatedMemories[memory.id];
-								return updated && updated.version > memory.version ? updated : memory;
-							})}
+					<InspectionCard
+						inspection={work.inspection}
+						snapshotUpdatedAt={work.snapshotUpdatedAt}
+						busy={inspecting}
+						onInspect={() => void inspectNow()}
+						onLogs={() => setShowLogs(true)}
+					/>
+					{selectedModule && (
+						<ModuleDetails
+							node={selectedModule}
+							memories={memories}
+							sessions={sessions ?? []}
 							pending={pendingMemories}
-							filter={memoryFilter}
-							onFilter={setMemoryFilter}
-							onStatus={(memoryId, status) => void setStatus(memoryId, status)}
+							onStatus={setStatus}
 						/>
-						<TreeCard nodes={work.tree} />
-					</div>
-				)}
+					)}
+					<MemoriesCard
+						memories={memories}
+						pending={pendingMemories}
+						filter={memoryFilter}
+						onFilter={setMemoryFilter}
+						onStatus={(memoryId, status) => void setStatus(memoryId, status)}
+					/>
+				</div>
+			)}
 			</aside>
+			{showLogs && work && (
+				<InspectionLogPanel projectId={work.project.id} onClose={() => setShowLogs(false)} />
+			)}
 		</div>
 	);
 }
 
-export function InspectionCard({ inspection, snapshotUpdatedAt, busy, onInspect }: {
+export function InspectionCard({ inspection, snapshotUpdatedAt, busy, onInspect, onLogs }: {
 	inspection: ProjectInspectionDTO;
 	snapshotUpdatedAt?: number;
 	busy: boolean;
 	onInspect: () => void;
+	onLogs: () => void;
 }) {
 	const { t } = useI18n();
 	const statusClass = inspection.running ? "state-running" : inspection.enabled ? "state-idle" : "state-offline";
@@ -201,9 +224,14 @@ export function InspectionCard({ inspection, snapshotUpdatedAt, busy, onInspect 
 			{!inspection.running && !busy && inspection.lastError && (
 				<p className="error work-hint">{inspection.lastError}<br />{t("work.inspection.retryHint")}</p>
 			)}
-			<button type="button" disabled={busy || inspection.running} onClick={onInspect}>
-				{inspection.running || busy ? t("work.inspectRunning") : t("work.inspect")}
-			</button>
+			<div className="inspection-actions">
+				<button type="button" disabled={busy || inspection.running} onClick={onInspect}>
+					{inspection.running || busy ? t("work.inspectRunning") : t("work.inspect")}
+				</button>
+				<button type="button" className="secondary" onClick={onLogs}>
+					{t("work.logs")}
+				</button>
+			</div>
 		</section>
 	);
 }
@@ -343,7 +371,59 @@ function MemoryItem({ memory, busy, onStatus }: { memory: ProjectMemoryDTO; busy
 	);
 }
 
-function TreeCard({ nodes }: { nodes: ProjectTreeNodeDTO[] }) {
+export function ModuleDetails({ node, memories, sessions, pending, onStatus }: {
+	node: ProjectTreeNodeDTO;
+	memories: ProjectMemoryDTO[];
+	sessions: HistorySessionDTO[];
+	pending: Set<string>;
+	onStatus: (memoryId: string, status: ProjectMemoryStatus) => void;
+}) {
+	const { t } = useI18n();
+	const linkedMemories = memories.filter((memory) => Array.isArray(memory.moduleIds) && memory.moduleIds.includes(node.id));
+	const sessionById = new Map(sessions.map((session) => [session.id, session]));
+	const linkedSessions = [...new Set(linkedMemories.flatMap((memory) => memory.evidence.map((evidence) => evidence.sessionId)))]
+		.flatMap((sessionId) => {
+			const session = sessionById.get(sessionId);
+			return session ? [session] : [];
+		});
+	return (
+		<section className="rail-card rail-group-item module-details">
+			<header>
+				<h2>{t("module.details")}</h2>
+			</header>
+			<p className="module-name">{node.label}</p>
+			{linkedMemories.length === 0 && <p className="muted">{t("module.empty")}</p>}
+			{linkedSessions.length > 0 && (
+				<div className="module-section">
+					<h3>{t("module.sessions")}</h3>
+					<div className="memory-evidence">
+						{linkedSessions.map((session) => (
+							<Link key={session.id} className="mono" to={`/sessions/${session.id}`} title={session.id}>
+								{session.title ?? `#${session.id.slice(0, 8)}`}
+							</Link>
+						))}
+					</div>
+				</div>
+			)}
+			{linkedMemories.length > 0 && (
+				<div className="module-section">
+					<h3>{t("module.memories")}</h3>
+					<ul className="memory-list">
+						{linkedMemories.map((memory) => (
+							<MemoryItem key={memory.id} memory={memory} busy={pending.has(memory.id)} onStatus={onStatus} />
+						))}
+					</ul>
+				</div>
+			)}
+		</section>
+	);
+}
+
+function TreeCard({ nodes, selectedNodeId, onSelect }: {
+	nodes: ProjectTreeNodeDTO[];
+	selectedNodeId?: string;
+	onSelect: (nodeId: string) => void;
+}) {
 	const { t } = useI18n();
 	// Bucket once; parents missing from the payload collapse to the root level.
 	const byParent = useMemo(() => {
@@ -358,42 +438,61 @@ function TreeCard({ nodes }: { nodes: ProjectTreeNodeDTO[] }) {
 		return map;
 	}, [nodes]);
 	return (
-		<section className="board-section rail-group-item tree-section">
+		<section className="board-section tree-section tree-explorer" aria-label={t("work.tree")}>
 			<header>
 				<h2>{t("work.tree")}</h2>
 				<span className="count">{nodes.length}</span>
 			</header>
-			{nodes.length === 0 ? (
-				<p className="muted">{t("work.tree.empty")}</p>
-			) : (
-				<TreeLevel byParent={byParent} parentId={null} />
-			)}
+			<div className="tree-explorer-scroll">
+				{nodes.length === 0 ? (
+					<p className="muted">{t("work.tree.empty")}</p>
+				) : (
+					<TreeLevel byParent={byParent} parentId={null} selectedNodeId={selectedNodeId} onSelect={onSelect} />
+				)}
+			</div>
 		</section>
 	);
 }
 
-function TreeLevel({ byParent, parentId }: { byParent: Map<string | null, ProjectTreeNodeDTO[]>; parentId: string | null }) {
+function TreeLevel({ byParent, parentId, depth = 0, selectedNodeId, onSelect }: {
+	byParent: Map<string | null, ProjectTreeNodeDTO[]>;
+	parentId: string | null;
+	depth?: number;
+	selectedNodeId?: string;
+	onSelect: (nodeId: string) => void;
+}) {
 	const { t } = useI18n();
 	const children = byParent.get(parentId) ?? [];
 	if (children.length === 0) return null;
 	return (
 		<ul className="work-tree">
-			{children.map((node) => (
-				<li key={node.id}>
-					<div className={`work-node severity-${node.severity ?? "info"}`}>
-						<span className="work-kind">{t(`tree.kind.${node.kind}` as MsgKey)}</span>
-						{node.sessionId ? (
-							<Link className="work-label" to={`/sessions/${node.sessionId}`} title={node.sessionId}>
-								{node.label}
-							</Link>
-						) : (
-							<span className="work-label">{node.label}</span>
-						)}
-					</div>
-					{node.detail && <p className="work-detail">{node.detail}</p>}
-					<TreeLevel byParent={byParent} parentId={node.id} />
-				</li>
-			))}
+			{children.map((node) => {
+				const kids = byParent.get(node.id) ?? [];
+				return (
+					<li key={node.id}>
+						{/* one folder level below the project root starts collapsed */}
+						<details open={depth !== 1}>
+							<summary
+								className={`work-node severity-${node.severity ?? "info"}${selectedNodeId === node.id ? " is-selected" : ""}`}
+								aria-current={selectedNodeId === node.id ? "true" : undefined}
+								onClick={() => { if (node.kind === "module") onSelect(node.id); }}
+							>
+								<span className={`tree-twisty${kids.length > 0 ? "" : " is-leaf"}`} aria-hidden="true" />
+								<span className="work-kind">{t(`tree.kind.${node.kind}` as MsgKey)}</span>
+								{node.sessionId ? (
+									<Link className="work-label" to={`/sessions/${node.sessionId}`} title={node.sessionId} onClick={(event) => event.stopPropagation()}>
+										{node.label}
+									</Link>
+								) : (
+									<span className="work-label">{node.label}</span>
+								)}
+							</summary>
+							{node.detail && <p className="work-detail">{node.detail}</p>}
+							<TreeLevel byParent={byParent} parentId={node.id} depth={depth + 1} selectedNodeId={selectedNodeId} onSelect={onSelect} />
+						</details>
+					</li>
+				);
+			})}
 		</ul>
 	);
 }

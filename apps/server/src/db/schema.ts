@@ -241,6 +241,10 @@ export const modelSettings = pgTable("model_settings", {
 	apiKeyCipher: text("api_key_cipher"),
 	enabled: boolean("enabled").notNull().default(false),
 	inspectionIntervalMinutes: integer("inspection_interval_minutes").notNull().default(60),
+	inspectionWindowStart: integer("inspection_window_start").notNull().default(0),
+	inspectionWindowEnd: integer("inspection_window_end").notNull().default(1439),
+	// weekday bit mask: bit d = weekday d (0 = Sunday); 127 = every day
+	inspectionWeekdays: integer("inspection_weekdays").notNull().default(127),
 	updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -313,6 +317,24 @@ export const projectInspections = pgTable(
 	(t) => [index("idx_project_inspections_project").on(t.userId, t.projectId, t.startedAt)],
 );
 
+/**
+ * Full inspection transcript: the exact redacted input sent to the model and
+ * its raw output, for the dashboard log panel. 1:1 with a project_inspections
+ * run; rows are pruned to the newest RETAINED_INSPECTION_LOGS per project.
+ */
+export const projectInspectionLogs = pgTable(
+	"project_inspection_logs",
+	{
+		inspectionId: uuid("inspection_id")
+			.primaryKey()
+			.references(() => projectInspections.id, { onDelete: "cascade" }),
+		requestPayload: jsonb("request_payload").notNull(),
+		responseContent: text("response_content"),
+		reasoningContent: text("reasoning_content"),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+);
+
 export const projectMemories = pgTable(
 	"project_memories",
 	{
@@ -329,6 +351,7 @@ export const projectMemories = pgTable(
 		content: text("content").notNull(),
 		status: text("status").notNull().default("candidate"),
 		evidence: jsonb("evidence").notNull(),
+		moduleIds: jsonb("module_ids").notNull().default([]),
 		sourceInspectionId: uuid("source_inspection_id").references(() => projectInspections.id, { onDelete: "set null" }),
 		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 		supersededAt: timestamp("superseded_at", { withTimezone: true }),

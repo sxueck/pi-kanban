@@ -90,6 +90,8 @@ export function Board() {
 						<HeroTile label={t("hero.pending")} value={stats.waiting} />
 						<HeroTile label={t("hero.idle")} value={stats.idle} />
 						<HeroTile label={t("hero.projects")} value={stats.projects} />
+						<HeroTile label={t("hero.totalProjects")} value={lifetime != null ? lifetime.totalProjects : "…"} />
+						<HeroTile label={t("hero.totalSessions")} value={lifetime != null ? lifetime.totalSessions : "…"} />
 						<HeroTile label={t("hero.cost")} value={lifetime != null ? fmtCost(lifetime.totalCostUsd) : "…"} />
 					</div>
 				</section>

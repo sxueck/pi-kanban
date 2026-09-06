@@ -97,7 +97,7 @@ export async function runGate(
 		waitForCloud(deps, { ...base, localPrompted: ctx.hasUI });
 
 	let localPrompt: Promise<boolean> | null = null;
-	if (ctx.hasUI && deps.gate.localTimeoutSec > 0) {
+	if (!rule.interactive && ctx.hasUI && deps.gate.localTimeoutSec > 0) {
 		localPrompt = ctx.ui.confirm(
 			"pi-kanban approval",
 			`Allow ${rule.label}?\n\n${summarizeInput(event)}`,
