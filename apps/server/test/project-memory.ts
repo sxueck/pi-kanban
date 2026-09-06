@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import { computeNextInspectionAt, type InspectionDelta, type InspectionSchedule } from "@pi-kanban/shared";
-import { buildStructureTree } from "../src/project-tree.js";
+import { addProjectReadCoverage, buildStructureTree, collectToolCallFiles, mergeSnapshotTree } from "../src/project-tree.js";
 import {
 	CONNECTION_TEST_TIMEOUT_MS,
 	FULL_INSPECTION_TIMEOUT_MS,
+	MAX_AGENT_ROUNDS,
+	MAX_AGENT_TOOL_CALLS,
 	parseInspectionResult,
 	readResponseText,
 	requestInspection,
+	requestInspectionAgent,
 	requestInspectionStreaming,
+	ToolCapabilityError,
 } from "../src/model.js";
 import {
 	assembleInspectionInput,
@@ -18,6 +22,7 @@ import {
 	redactInspectionResult,
 	retainStructureModuleIds,
 	splitInspectionBatches,
+	isStrictlyEmptyUuidSession,
 	toInspectionConnection,
 } from "../src/inspector.js";
 import { decryptApiKey, encryptApiKey, planInspectionSchedule, validateModelSettings } from "../src/model-settings.js";
@@ -101,7 +106,9 @@ try {
 	assert.equal(FULL_INSPECTION_TIMEOUT_MS, 10 * 60_000);
 	assert.equal(CONNECTION_TEST_TIMEOUT_MS, 30_000);
 	assert.equal(MAX_INSPECTION_BATCHES, 4);
-	assert.equal(INSPECTION_LOCK_TTL_MS, (MAX_INSPECTION_BATCHES + 1) * FULL_INSPECTION_TIMEOUT_MS);
+	assert.equal(MAX_AGENT_ROUNDS, 6);
+	assert.equal(MAX_AGENT_TOOL_CALLS, 12);
+	assert.equal(INSPECTION_LOCK_TTL_MS, (MAX_AGENT_ROUNDS + 1) * FULL_INSPECTION_TIMEOUT_MS);
 
 	const sensitive = [
 		"email=alice" + "@example.com",
@@ -122,7 +129,7 @@ try {
 
 	const parsed = parseInspectionResult(JSON.stringify({
 		memories: [
-			{ kind: "decision", content: "Use PostgreSQL for durable state", moduleIds: ["path:apps/server"], evidence: [{ sessionId: "s1", turnPosition: 2 }] },
+			{ kind: "decision", content: "Use PostgreSQL for durable state", confidence: "high", moduleIds: ["path:apps/server"], evidence: [{ sessionId: "s1", turnPosition: 2 }] },
 			{ kind: "invalid", content: "drop me" },
 		],
 		tree: [
@@ -134,8 +141,13 @@ try {
 	assert.equal(parsed.memories[0]?.evidence[0]?.sessionId, "s1");
 	assert.equal(parsed.tree.length, 1);
 	assert.equal(parsed.tree[0]?.kind, "issue");
+	assert.equal(
+		parseInspectionResult(JSON.stringify({ memories: [{ kind: "fact", content: "unsupported confidence", moduleIds: [], evidence: [] }], tree: [] })).memories.length,
+		0,
+		"memories without high-confidence evidence must not enter the automatic path",
+	);
 	const outputWithPii = redactInspectionResult({
-		memories: [{ kind: "fact", content: "Owner is alice" + "@example.com", moduleIds: [], evidence: [] }],
+		memories: [{ kind: "fact", content: "Owner is alice" + "@example.com", confidence: "high", moduleIds: [], evidence: [] }],
 		tree: [{ id: "insight:1", kind: "issue", label: "Host 192.168.10.20" }],
 	});
 	assert.ok(outputWithPii.count >= 2);
@@ -154,6 +166,70 @@ try {
 	assert.equal(tree[0]?.id, "project");
 	assert.ok(tree.some((node) => node.id === "path:apps/web/src" && node.parentId === "path:apps/web"));
 	assert.ok(tree.some((node) => node.id === "file:README.md" && node.parentId === "project"));
+	const coverage = addProjectReadCoverage(tree, [
+		{ path: "apps/web/src/main.tsx" },
+		{ path: "apps/web/src/App.tsx" },
+		{ path: "packages/shared/src/index.ts" },
+		{ path: "README.md" },
+	], [
+		{ cwd: "D:/work/pi-kanban", toolName: "read", input: { path: "apps/web/src/main.tsx" } },
+		{ cwd: "D:/work/pi-kanban", toolName: "functions.read_symbol", input: { path: "D:\\work\\pi-kanban\\packages\\shared\\src\\index.ts" } },
+		{ cwd: "D:/work/pi-kanban", toolName: "bash", input: { path: "apps/web/src/App.tsx" } },
+	]);
+	assert.equal(coverage.totalFiles, 4);
+	assert.equal(coverage.readFiles, 2, "only file-reading tools count toward session coverage");
+	assert.deepEqual(coverage.tree.find((node) => node.id === "project")?.coverage, { totalFiles: 4, readFiles: 2 });
+	assert.deepEqual(coverage.tree.find((node) => node.id === "path:apps")?.coverage, { totalFiles: 2, readFiles: 1 });
+
+	// A snapshot upload rebuilds structure but must preserve inspection insight
+	// nodes (decision/milestone/issue/evidence) already merged into latestTree.
+	const withInsights = mergeSnapshotTree([
+		{ id: "project", kind: "project", label: "pi-kanban" },
+		{ id: "path:stale", kind: "module", label: "stale" },
+		{ id: "insight:1", kind: "decision", label: "Use mergeProjectTree", parentId: "path:apps/web" },
+		{ id: "insight:2", kind: "issue", label: "Flaky test", parentId: "path:gone" },
+		{ id: "garbage", label: 42 },
+		null,
+	], [
+		{ path: "apps/web/src/main.tsx" },
+		{ path: "README.md" },
+	], "pi-kanban");
+	assert.ok(withInsights.some((node) => node.id === "path:apps/web/src"), "fresh structure present");
+	assert.ok(!withInsights.some((node) => node.id === "path:stale"), "stale structure replaced");
+	assert.equal(withInsights.find((node) => node.id === "insight:1")?.parentId, "path:apps/web", "insight keeps a still-valid structure parent");
+	assert.equal(withInsights.find((node) => node.id === "insight:2")?.parentId, "project", "insight with a gone parent reattaches to the project root");
+	assert.equal(withInsights.filter((node) => node.kind === "decision" || node.kind === "issue").length, 2, "malformed entries dropped");
+
+	// Snapshot-less projects derive their file list from session tool calls.
+	const derivedFiles = collectToolCallFiles([
+		{ cwd: "D:/work/pi-kanban", toolName: "read", input: { path: "apps/web/src/main.tsx" } },
+		{ cwd: "D:/work/pi-kanban", toolName: "edit", input: { path: "apps/web/src/App.tsx" } },
+		{ cwd: "D:/work/pi-kanban", toolName: "write", input: { path: "apps/web/src/App.tsx" } },
+		{ cwd: "D:/work/pi-kanban", toolName: "bash", input: { command: "ls apps" } },
+		{ cwd: "D:/work/pi-kanban", toolName: "grep", input: { path: "apps" } },
+		{ cwd: "D:/work/pi-kanban", toolName: "read", input: { path: "C:/elsewhere/secret.ts" } },
+	]);
+	assert.deepEqual(derivedFiles, [
+		{ path: "apps/web/src/App.tsx" },
+		{ path: "apps/web/src/main.tsx" },
+	], "only file-touching tools contribute, deduped and sorted, outside-root paths excluded");
+
+	const emptySession = {
+		id: "01a075f7-b159-7691-9ba1-615be92378fc",
+		title: null,
+		branch: null,
+		modelId: null,
+		turnCount: 0,
+		totalCostUsd: 0,
+		inputTokens: 0,
+		cacheReadTokens: 0,
+		totalTokens: 0,
+		contextTokens: 0,
+		contextWindow: 0,
+	};
+	assert.equal(isStrictlyEmptyUuidSession(emptySession), true);
+	assert.equal(isStrictlyEmptyUuidSession({ ...emptySession, title: "kept metadata" }), false);
+	assert.equal(isStrictlyEmptyUuidSession({ ...emptySession, id: "ephemeral" }), false);
 
 	// --- settings → schedule coordination (pure planner) ----------------------
 	// All dates are constructed in local time because the schedule itself is
@@ -205,18 +281,18 @@ try {
 	// Model memory associations are bounded and deduplicated before persistence validation.
 	assert.deepEqual(
 		parseInspectionResult(JSON.stringify({
-			memories: [{ kind: "fact", content: "module-scoped", moduleIds: ["path:apps/web", "path:apps/web", "path:apps/server", "path:extra"], evidence: [] }],
+			memories: [{ kind: "fact", content: "module-scoped", confidence: "high", moduleIds: ["path:apps/web", "path:apps/web", "path:apps/server", "path:extra"], evidence: [] }],
 			tree: [],
 		})).memories,
-		[{ kind: "fact", content: "module-scoped", moduleIds: ["path:apps/web", "path:apps/server", "path:extra"], evidence: [] }],
+		[{ kind: "fact", content: "module-scoped", confidence: "high", moduleIds: ["path:apps/web", "path:apps/server", "path:extra"], evidence: [] }],
 	);
 
 	assert.deepEqual(
 		retainStructureModuleIds(
-			[{ kind: "fact", content: "filtered", moduleIds: ["path:apps/web", "bad", "path:apps/web", "path:apps/server"], evidence: [] }],
+			[{ kind: "fact", content: "filtered", confidence: "high", moduleIds: ["path:apps/web", "bad", "path:apps/web", "path:apps/server"], evidence: [] }],
 			new Set(["project", "path:apps/web"]),
 		),
-		[{ kind: "fact", content: "filtered", moduleIds: ["path:apps/web"], evidence: [] }],
+		[{ kind: "fact", content: "filtered", confidence: "high", moduleIds: ["path:apps/web"], evidence: [] }],
 	);
 
 	// --- bounded, deterministic model input -----------------------------------
@@ -256,13 +332,13 @@ try {
 	assert.deepEqual((batchedInput.context as { batch?: unknown }).batch, { index: 1, total: 2 });
 	const merged = mergeInspectionResults([
 		{
-			memories: [{ kind: "decision", content: "Use PostgreSQL", moduleIds: [], evidence: [] }],
+			memories: [{ kind: "decision", content: "Use PostgreSQL", confidence: "high", moduleIds: [], evidence: [] }],
 			tree: [{ id: "insight:0", kind: "issue", label: "first batch" }],
 		},
 		{
 			memories: [
-				{ kind: "decision", content: "use postgresql", moduleIds: [], evidence: [] },
-				{ kind: "fact", content: "second batch", moduleIds: [], evidence: [] },
+				{ kind: "decision", content: "use postgresql", confidence: "high", moduleIds: [], evidence: [] },
+				{ kind: "fact", content: "second batch", confidence: "high", moduleIds: [], evidence: [] },
 			],
 			tree: [{ id: "insight:0", kind: "issue", label: "second batch" }],
 		},
@@ -339,6 +415,47 @@ try {
 		assert.equal(sentBody.response_format.type, "json_object");
 		assert.equal(sentBody.messages.length, 2);
 		assert.ok(fetchCalls[0]?.init?.signal instanceof AbortSignal);
+		fetchCalls.length = 0;
+		mockFetch(() => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ memories: [], tree: [] }) } }] }), { status: 200, headers: { "content-type": "application/json" } }));
+		await requestInspection({ ...testConnection, model: "glm-5.3-flash" }, { project: { name: "pi-kanban" } }, { timeoutMs: 2_000, purpose: "unit" });
+		const glmBody = JSON.parse(String(fetchCalls[0]?.init?.body));
+		assert.equal(glmBody.max_tokens, 16_384);
+		assert.equal(glmBody.response_format, undefined);
+		let agentRequestCount = 0;
+		const agentSteps: string[] = [];
+		mockFetch(() => {
+			agentRequestCount++;
+			const message = agentRequestCount === 1
+				? {
+					tool_calls: [{ id: "call-sessions", type: "function", function: { name: "list_sessions", arguments: "{\"limit\":1}" } }],
+				}
+				: {
+					tool_calls: [{ id: "call-finalize", type: "function", function: { name: "finalize_inspection", arguments: JSON.stringify({ memories: [], tree: [] }) } }],
+				};
+			return new Response(JSON.stringify({ choices: [{ message }] }), { status: 200, headers: { "content-type": "application/json" } });
+		});
+		const agent = await requestInspectionAgent(testConnection, { project: { name: "pi-kanban" } }, [{
+			type: "function",
+			function: { name: "list_sessions", description: "test", parameters: { type: "object" } },
+		}], {
+			executeTool: async (call) => ({ content: { sessions: [{ id: call.arguments.limit === 1 ? "s1" : "unexpected" }], detail: "x".repeat(20_000) }, redactionCount: 1, audit: { source: "test" } }),
+			onTool: (step) => agentSteps.push(`${step.round}:${step.tool}:${step.status}`),
+		});
+		assert.deepEqual(agent.result, { memories: [], tree: [] });
+		assert.equal(agentRequestCount, 2);
+		assert.deepEqual(agentSteps, ["1:list_sessions:completed"]);
+		assert.equal(agent.steps[0]?.redactionCount, 1);
+		const agentFirstBody = JSON.parse(String(fetchCalls.at(-2)?.init?.body));
+		const agentSecondBody = JSON.parse(String(fetchCalls.at(-1)?.init?.body));
+		assert.equal(agentFirstBody.response_format, undefined, "tools must not be combined with JSON response_format");
+		assert.equal(agentFirstBody.tools[0]?.function.name, "list_sessions");
+		assert.equal(agentSecondBody.messages.at(-1)?.role, "tool");
+		assert.ok(Buffer.byteLength(agentSecondBody.messages.at(-1)?.content ?? "") <= 16_000, "each tool result must respect its byte budget");
+		mockFetch(() => new Response("tools unsupported", { status: 400 }));
+		await assert.rejects(
+			requestInspectionAgent(testConnection, {}, [], { executeTool: async () => ({ content: {}, redactionCount: 0, audit: {} }) }),
+			ToolCapabilityError,
+		);
 		// reasoning_content / reasoning are surfaced for the inspection log panel
 		mockFetch(() => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ memories: [], tree: [] }), reasoning_content: " weighing evidence…" } }] }), { status: 200, headers: { "content-type": "application/json" } }));
 		const withReasoning = await requestInspection(testConnection, {}, { timeoutMs: 2_000 });
@@ -359,6 +476,7 @@ try {
 		);
 		const payloadJson = JSON.stringify({ memories: [], tree: [] });
 		const streamDeltas: InspectionDelta[] = [];
+		let streamActivity = 0;
 		mockFetch(() => streamResponse(
 			sseData({ choices: [{ delta: { reasoning_content: "weighing " } }] }) +
 			sseData({ choices: [{ delta: { reasoning_content: "evidence" } }] }) +
@@ -366,7 +484,7 @@ try {
 			sseData({ choices: [{ delta: { content: payloadJson.slice(10) } }] }) +
 			"data: [DONE]\n\n",
 		));
-		const streamed = await requestInspectionStreaming(testConnection, { project: { name: "x" } }, { timeoutMs: 2_000, onDelta: (d) => streamDeltas.push(d) });
+		const streamed = await requestInspectionStreaming(testConnection, { project: { name: "x" } }, { timeoutMs: 2_000, onActivity: () => { streamActivity++; }, onDelta: (d) => streamDeltas.push(d) });
 		assert.deepEqual(streamDeltas, [
 			{ type: "reasoning", text: "weighing " },
 			{ type: "reasoning", text: "evidence" },
@@ -376,7 +494,22 @@ try {
 		assert.equal(streamed.reasoning, "weighing evidence");
 		assert.equal(streamed.content, payloadJson);
 		assert.deepEqual(streamed.result, { memories: [], tree: [] });
+		assert.equal(streamActivity, 1, "one raw SSE body chunk reports stream activity even when it contains multiple events");
 		assert.equal(JSON.parse(String(fetchCalls.at(-1)?.init?.body)).stream, true, "streaming requests must ask for stream:true");
+		// A valid SSE stream may run longer than one timeout window as long as
+		// each raw SSE chunk arrives before the idle deadline.
+		mockFetch(() => new Response(
+			new ReadableStream({
+				start(controller) {
+					controller.enqueue(new TextEncoder().encode(sseData({ choices: [{ delta: { content: payloadJson.slice(0, 10) } }] })));
+					setTimeout(() => controller.enqueue(new TextEncoder().encode(sseData({ choices: [{ delta: { content: payloadJson.slice(10) } }] }))), 70);
+					setTimeout(() => controller.close(), 190);
+				},
+			}),
+			{ status: 200, headers: { "content-type": "text/event-stream" } },
+		));
+		const longLivedStream = await requestInspectionStreaming(testConnection, {}, { timeoutMs: 120 });
+		assert.deepEqual(longLivedStream.result, { memories: [], tree: [] }, "SSE activity must reset the inspection idle timeout");
 		// a chunk boundary splitting one SSE block mid-JSON must still assemble
 		const splitEncoded = new TextEncoder().encode(sseData({ choices: [{ delta: { content: payloadJson } }] }) + "data: [DONE]\n\n");
 		mockFetch(() => new Response(

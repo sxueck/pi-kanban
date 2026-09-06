@@ -10,8 +10,8 @@ const memories: ProjectMemoryDTO[] = [
 	{ id: "pin", version: 1, kind: "fact", content: "Pinned memory", status: "pinned", moduleIds: [], evidence: [], createdAt: 100 },
 	{ id: "dec", version: 1, kind: "decision", content: "Decision memory", status: "candidate", moduleIds: [], evidence: [], createdAt: 50 },
 ];
-const renderMemories = (filter: "all" | "candidate", pending = new Set<string>()) => renderToStaticMarkup(
-	<MemoryRouter><MemoriesCard memories={memories} pending={pending} filter={filter} onFilter={() => {}} onStatus={() => {}} /></MemoryRouter>,
+const renderMemories = (filter: "all" | "candidate", pending = new Set<string>(), insights: Parameters<typeof MemoriesCard>[0]["insights"] = []) => renderToStaticMarkup(
+	<MemoryRouter><MemoriesCard memories={memories} insights={insights} pending={pending} filter={filter} onFilter={() => {}} onStatus={() => {}} /></MemoryRouter>,
 );
 const all = renderMemories("all");
 assert.ok(all.indexOf("Pinned memory") < all.indexOf("New memory"));
@@ -23,6 +23,14 @@ assert.ok(all.includes("memory-scroll"), "memory list must render inside the scr
 const pending = renderMemories("candidate", new Set(["new"]));
 assert.ok(!pending.includes("Pinned memory"));
 assert.equal((pending.match(/disabled=""/g) ?? []).length, 3, "all actions on the pending item must be disabled");
+// root-level inspection insights render as a fallback group after the memory groups
+const withInsights = renderMemories("all", new Set(), [
+	{ id: "i1", kind: "issue", label: "Runner alias drift", severity: "warning", sessionId: "s9" },
+]);
+assert.ok(withInsights.includes("Inspection insights"));
+assert.ok(withInsights.includes("Runner alias drift"));
+assert.ok(withInsights.includes("severity-warning"));
+assert.ok(withInsights.indexOf("Pinned memory") < withInsights.indexOf("Runner alias drift"), "insight group follows the memory groups");
 const inspection = { enabled: true, intervalMinutes: 60, running: false, lastError: "previous-timeout" };
 const idle = renderToStaticMarkup(<InspectionCard inspection={inspection} busy={false} onInspect={() => {}} onLogs={() => {}} />);
 assert.ok(idle.includes("previous-timeout"));
@@ -58,6 +66,7 @@ assert.deepEqual(
 const moduleDetails = renderToStaticMarkup(
 	<MemoryRouter><ModuleDetails
 		node={{ id: "path:apps/web", parentId: "project", kind: "module", label: "web" }}
+		insights={[{ id: "i1", kind: "decision", label: "Use mergeProjectTree", sessionId: "s1" }]}
 		memories={[
 			{ id: "linked", version: 1, kind: "fact", content: "Linked memory", status: "candidate", moduleIds: ["path:apps/web"], evidence: [{ sessionId: "s1", turnPosition: 2 }], createdAt: 300 },
 			{ id: "other", version: 1, kind: "fact", content: "Other memory", status: "candidate", moduleIds: ["path:apps/server"], evidence: [{ sessionId: "s2" }], createdAt: 250 },
@@ -74,9 +83,11 @@ assert.ok(moduleDetails.includes("Linked memory"));
 assert.ok(!moduleDetails.includes("Other memory"));
 assert.ok(moduleDetails.includes("Web session"));
 assert.ok(!moduleDetails.includes("Server session"));
+assert.ok(moduleDetails.includes("Use mergeProjectTree"), "module-linked insights render in module details");
 const legacyModuleDetails = renderToStaticMarkup(
 	<MemoryRouter><ModuleDetails
 		node={{ id: "path:apps/web", parentId: "project", kind: "module", label: "web" }}
+		insights={[]}
 		memories={[{ id: "legacy", version: 1, kind: "fact", content: "Legacy memory", status: "candidate", evidence: [], createdAt: 100 } as unknown as ProjectMemoryDTO]}
 		sessions={[]}
 		pending={new Set()}

@@ -16,6 +16,7 @@ import type {
 	ModelSettingsInput,
 	ProjectHistoryDTO,
 	ProjectMemoryStatus,
+	ProjectSnapshotFile,
 	ProjectTreeNodeDTO,
 	ProjectWorkDTO,
 	RecentSessionDTO,
@@ -76,6 +77,7 @@ import {
 	toMemoryDto,
 } from "./inspector.js";
 import { getLiveInspection, subscribeInspectionLive, type InspectionLiveEvent } from "./inspection-live.js";
+import { addProjectReadCoverage, collectToolCallFiles, mergeSnapshotTree } from "./project-tree.js";
 
 type AppEnv = { Variables: { auth: AuthUser } };
 export const api = new Hono<AppEnv>();
@@ -564,17 +566,33 @@ api.get("/api/projects/:id/work", async (c) => {
 		.limit(1);
 	if (!owned) return c.json({ error: "project not found" }, 404);
 	await ensureProjectAnalysisState(userId, projectId);
-	const [memoryRows, stateRows, snapshotRows, settings] = await Promise.all([
+	const [memoryRows, stateRows, snapshotRows, readToolRows, settings] = await Promise.all([
 		db.select().from(projectMemories).where(and(eq(projectMemories.userId, userId), eq(projectMemories.projectId, projectId), isNull(projectMemories.supersededAt))).orderBy(desc(projectMemories.createdAt)),
 		db.select().from(projectAnalysisStates).where(and(eq(projectAnalysisStates.userId, userId), eq(projectAnalysisStates.projectId, projectId))).limit(1),
-		db.select({ createdAt: projectSnapshots.createdAt }).from(projectSnapshots).where(and(eq(projectSnapshots.userId, userId), eq(projectSnapshots.projectId, projectId))).orderBy(desc(projectSnapshots.createdAt)).limit(1),
+		db.select({ createdAt: projectSnapshots.createdAt, files: projectSnapshots.files }).from(projectSnapshots).where(and(eq(projectSnapshots.userId, userId), eq(projectSnapshots.projectId, projectId))).orderBy(desc(projectSnapshots.createdAt)).limit(1),
+		db.select({ cwd: sessions.cwd, toolName: toolCalls.toolName, input: toolCalls.input }).from(toolCalls)
+			.innerJoin(sessions, eq(toolCalls.sessionId, sessions.id))
+			.where(and(eq(sessions.userId, userId), eq(sessions.projectId, projectId))),
 		readModelSettings(),
 	]);
 	const state = stateRows[0];
+	const snapshotFiles = asSnapshotFiles(snapshotRows[0]?.files);
+	// Projects without a plugin snapshot still get a structure tree: derive it
+	// from the file paths their sessions actually read or wrote.
+	const files = snapshotFiles.length > 0 ? snapshotFiles : collectToolCallFiles(readToolRows);
+	const latestTree = snapshotFiles.length > 0
+		? asProjectTree(state?.latestTree)
+		: mergeSnapshotTree(state?.latestTree, files, owned.name);
+	const readCoverage = addProjectReadCoverage(latestTree, files, readToolRows);
 	const dto: ProjectWorkDTO = {
 		project: { id: owned.id, name: owned.name, gitRemote: owned.gitRemote ?? undefined },
 		memories: memoryRows.map(toMemoryDto),
-		tree: asProjectTree(state?.latestTree),
+		tree: readCoverage.tree,
+		coverage: {
+			totalFiles: readCoverage.totalFiles,
+			readFiles: readCoverage.readFiles,
+			highConfidenceMemories: memoryRows.filter((memory) => memory.status === "confirmed" || memory.status === "pinned").length,
+		},
 		inspection: {
 			enabled: settings?.enabled ?? false,
 			intervalMinutes: settings?.inspectionIntervalMinutes ?? 60,
@@ -940,6 +958,14 @@ function toApprovalDtos(rows: Array<{
 		decidedBy: row.decidedBy ?? undefined,
 		note: row.note ?? undefined,
 	}));
+}
+
+function asSnapshotFiles(value: unknown): ProjectSnapshotFile[] {
+	if (!Array.isArray(value)) return [];
+	return value.flatMap((file) => {
+		if (!file || typeof file !== "object" || typeof (file as { path?: unknown }).path !== "string") return [];
+		return [{ path: (file as { path: string }).path }];
+	});
 }
 
 function asProjectTree(value: unknown): ProjectTreeNodeDTO[] {

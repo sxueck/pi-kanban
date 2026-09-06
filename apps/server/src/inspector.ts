@@ -11,6 +11,7 @@ import { computeNextInspectionAt } from "@pi-kanban/shared";
 import { publish } from "./bus.js";
 import { db } from "./db/index.js";
 import {
+	approvals,
 	messages,
 	modelSettings,
 	projectAnalysisStates,
@@ -20,24 +21,31 @@ import {
 	projects,
 	projectSnapshots,
 	sessions,
+	todoLists,
 	toolCalls,
 	turns,
 } from "./db/schema.js";
 import { decryptApiKey, readModelSettings, toInspectionSchedule } from "./model-settings.js";
 import { recordInspectionDelta, recordInspectionStage } from "./inspection-live.js";
-import { FULL_INSPECTION_TIMEOUT_MS, requestInspectionStreaming, type ModelInspectionResult } from "./model.js";
+import { FULL_INSPECTION_TIMEOUT_MS, MAX_AGENT_ROUNDS, requestInspectionAgent, requestInspectionStreaming, ToolCapabilityError, type ModelInspectionResult } from "./model.js";
+import { executeInspectionAgentTool, INSPECTION_AGENT_TOOLS } from "./inspection-agent.js";
 import { buildStructureTree, mergeProjectTree } from "./project-tree.js";
 import { redactForModel, redactText, type Redactable } from "./redact.js";
 
 export const MAX_INSPECTION_BATCHES = 4;
 const SESSIONS_PER_INSPECTION_BATCH = 3;
 /**
- * A run may use four sequential ten-minute model requests. Leave an extra
- * batch of slack so a live claim cannot be reclaimed while it is completing.
+ * A run may use six sequential ten-minute model requests. Leave an extra
+ * request of slack so a live claim cannot be reclaimed while it is completing.
  */
-export const INSPECTION_LOCK_TTL_MS = (MAX_INSPECTION_BATCHES + 1) * FULL_INSPECTION_TIMEOUT_MS;
+export const INSPECTION_LOCK_TTL_MS = (MAX_AGENT_ROUNDS + 1) * FULL_INSPECTION_TIMEOUT_MS;
+/** Active SSE streams renew their claim at this cadence, not once per token. */
+const INSPECTION_LOCK_HEARTBEAT_MS = 60_000;
 /** Newest full transcripts kept per project; older runs keep only their metadata row. */
 export const RETAINED_INSPECTION_LOGS = 10;
+/** Empty UUID rows are retained briefly so a newly opened live session can report its first turn. */
+export const EMPTY_SESSION_RETENTION_MS = Number(process.env.EMPTY_SESSION_RETENTION_MS ?? 60 * 60_000);
+const EMPTY_SESSION_ID = "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$";
 const SESSION_LIMIT = 12;
 const MESSAGE_LIMIT = 400;
 const TOOL_LIMIT = 100;
@@ -198,6 +206,7 @@ export async function queueProjectInspection(
 ): Promise<boolean> {
 	const connection = toInspectionConnection(await readModelSettings());
 	if (!connection) throw new Error("model inspection is not configured");
+	await cleanEmptyUuidSessions();
 	const apiKey = decryptApiKey(connection.apiKeyCipher);
 	await ensureProjectAnalysisState(userId, projectId);
 	const now = new Date();
@@ -257,6 +266,12 @@ export async function runDueInspections(): Promise<void> {
 	await db.update(projectInspections).set({ status: "failed", error: "interrupted", finishedAt: now }).where(and(
 		eq(projectInspections.status, "running"),
 		lt(projectInspections.startedAt, staleBefore),
+		sql`not exists (
+			select 1 from ${projectAnalysisStates}
+			where ${projectAnalysisStates.userId} = ${projectInspections.userId}
+				and ${projectAnalysisStates.projectId} = ${projectInspections.projectId}
+				and ${projectAnalysisStates.lockedAt} >= ${staleBefore}
+		)`,
 	));
 	const settings = await readModelSettings();
 	if (!settings?.enabled || !settings.apiKeyCipher) return;
@@ -287,22 +302,38 @@ async function executeInspection(
 	claimedAt: Date,
 ): Promise<void> {
 	const startedMs = Date.now();
-	// Payloads survive the try scope so a failed batch still leaves a transcript.
+	let lockAt = claimedAt;
+	let lastLockHeartbeatMs = startedMs;
+	let lockHeartbeat: Promise<void> | undefined;
+	const renewLockFromStreamActivity = () => {
+		const now = new Date();
+		if (lockHeartbeat || now.getTime() - lastLockHeartbeatMs < INSPECTION_LOCK_HEARTBEAT_MS) return;
+		lastLockHeartbeatMs = now.getTime();
+		const expectedLockAt = lockAt;
+		lockHeartbeat = db.update(projectAnalysisStates)
+			.set({ lockedAt: now, updatedAt: now })
+			.where(and(
+				eq(projectAnalysisStates.userId, userId),
+				eq(projectAnalysisStates.projectId, projectId),
+				eq(projectAnalysisStates.lockedAt, expectedLockAt),
+			))
+			.returning({ lockedAt: projectAnalysisStates.lockedAt })
+			.then(([renewed]) => {
+				if (renewed?.lockedAt) lockAt = renewed.lockedAt;
+			})
+			.catch(() => undefined)
+			.finally(() => { lockHeartbeat = undefined; });
+	};
 	const logPayloads: unknown[] = [];
 	try {
 		const sections = await buildInspectionSections(userId, projectId);
-		const batches = splitInspectionBatches(sections);
-		if (batches.length > MAX_INSPECTION_BATCHES) {
-			throw new Error(`inspection exceeded the ${MAX_INSPECTION_BATCHES} batch limit`);
-		}
-		const responses = [];
-		let inputRedactions = 0;
-		for (const [batchOffset, batch] of batches.entries()) {
-			const batchNumber = batchOffset + 1;
-			const input = toRedactable(assembleInspectionInput(batch, { batch: { index: batchNumber, total: batches.length } }));
-			const redactedInput = redactForModel(input);
-			logPayloads.push(redactedInput.value);
-			inputRedactions += redactedInput.count;
+		const input = toRedactable(assembleInspectionInput(sections));
+		const redactedInput = redactForModel(input);
+		let inputRedactions = redactedInput.count;
+		let result: ModelInspectionResult;
+		let responseContent: string;
+		let reasoningContent: string | undefined;
+		try {
 			recordInspectionStage(projectId, trigger, {
 				stage: "assembled",
 				inspectionId: runId,
@@ -316,36 +347,79 @@ async function executeInspection(
 				model: connection.model,
 				timeoutMs: FULL_INSPECTION_TIMEOUT_MS,
 			});
-			if (batches.length > 1) {
-				recordInspectionDelta(projectId, runId, { type: "content", text: `\n\n--- batch ${batchNumber}/${batches.length} ---\n` });
+			const agent = await requestInspectionAgent(connection, redactedInput.value, INSPECTION_AGENT_TOOLS, {
+				executeTool: (call) => executeInspectionAgentTool(userId, projectId, call),
+				onTool: (step) => recordInspectionStage(projectId, trigger, {
+					stage: "tool_completed",
+					inspectionId: runId,
+					tool: step.tool,
+					round: step.round,
+					status: step.status,
+					resultBytes: step.resultBytes,
+					redactions: step.redactionCount,
+				}),
+			});
+			const redactedSteps = redactForModel(toRedactable(agent.steps));
+			logPayloads.push({ mode: "agent", input: redactedInput.value, steps: redactedSteps.value });
+			inputRedactions += redactedSteps.count;
+			result = agent.result;
+			responseContent = redactText(agent.content).value;
+			reasoningContent = agent.reasoning == null ? undefined : redactText(agent.reasoning).value;
+		} catch (error) {
+			if (!(error instanceof ToolCapabilityError)) throw error;
+			const batches = splitInspectionBatches(sections);
+			if (batches.length > MAX_INSPECTION_BATCHES) {
+				throw new Error(`inspection exceeded the ${MAX_INSPECTION_BATCHES} batch limit`);
 			}
-			responses.push(await requestInspectionStreaming(connection, redactedInput.value, {
-				timeoutMs: FULL_INSPECTION_TIMEOUT_MS,
-				purpose: `model inspection batch ${batchNumber}/${batches.length}`,
-				onDelta: (delta) => recordInspectionDelta(projectId, runId, delta),
-			}));
+			const responses = [];
+			const fallbackPayloads: unknown[] = [];
+			for (const [batchOffset, batch] of batches.entries()) {
+				const batchNumber = batchOffset + 1;
+				const batchInput = toRedactable(assembleInspectionInput(batch, { batch: { index: batchNumber, total: batches.length } }));
+				const redactedBatch = redactForModel(batchInput);
+				fallbackPayloads.push(redactedBatch.value);
+				inputRedactions += redactedBatch.count;
+				recordInspectionStage(projectId, trigger, {
+					stage: "assembled",
+					inspectionId: runId,
+					bytes: byteSize(redactedBatch.value),
+					redactions: redactedBatch.count,
+					omitted: omittedCounts(redactedBatch.value),
+				});
+				recordInspectionStage(projectId, trigger, {
+					stage: "request_sent",
+					inspectionId: runId,
+					model: connection.model,
+					timeoutMs: FULL_INSPECTION_TIMEOUT_MS,
+				});
+				if (batches.length > 1) recordInspectionDelta(projectId, runId, { type: "content", text: `\n\n--- batch ${batchNumber}/${batches.length} ---\n` });
+				responses.push(await requestInspectionStreaming(connection, redactedBatch.value, {
+					timeoutMs: FULL_INSPECTION_TIMEOUT_MS,
+					purpose: `model inspection batch ${batchNumber}/${batches.length}`,
+					onActivity: renewLockFromStreamActivity,
+					onDelta: (delta) => recordInspectionDelta(projectId, runId, delta),
+				}));
+			}
+			logPayloads.push({ mode: "batch_fallback", reason: error.message, batches: fallbackPayloads });
+			result = mergeInspectionResults(responses.map((response) => response.result));
+			const transcripts = responses.map((response, batchOffset) => {
+				const content = redactText(response.content);
+				const reasoning = response.reasoning == null ? undefined : redactText(response.reasoning);
+				inputRedactions += content.count + (reasoning?.count ?? 0);
+				return { batch: batchOffset + 1, content: content.value, reasoning: reasoning?.value };
+			});
+			responseContent = JSON.stringify(transcripts.map(({ batch, content }) => ({ batch, content })));
+			const reasoning = transcripts.flatMap((entry) => entry.reasoning == null ? [] : [{ batch: entry.batch, reasoning: entry.reasoning }]);
+			reasoningContent = reasoning.length > 0 ? JSON.stringify(reasoning) : undefined;
 		}
-		const mergedResult = mergeInspectionResults(responses.map((response) => response.result));
-		const redactedResult = redactInspectionResult(mergedResult);
-		const responseTranscripts: Array<{ batch: number; content: string; reasoning?: string; redactions: number }> = responses.map((response, batchOffset) => {
-			const content = redactText(response.content);
-			const reasoning = response.reasoning == null ? undefined : redactText(response.reasoning);
-			return {
-				batch: batchOffset + 1,
-				content: content.value,
-				reasoning: reasoning?.value,
-				redactions: content.count + (reasoning?.count ?? 0),
-			};
-		});
-		const reasoningTranscripts: Array<{ batch: number; reasoning: string }> = [];
-		for (const transcript of responseTranscripts) {
-			if (transcript.reasoning != null) reasoningTranscripts.push({ batch: transcript.batch, reasoning: transcript.reasoning });
-		}
-		const transcriptRedactions = responseTranscripts.reduce((total, transcript) => total + transcript.redactions, 0);
-		await persistInspectionResult(runId, userId, projectId, schedule, redactedResult.value, inputRedactions + redactedResult.count + transcriptRedactions, claimedAt, {
-			requestPayload: { batches: logPayloads },
-			responseContent: JSON.stringify(responseTranscripts.map(({ batch, content }) => ({ batch, content }))),
-			reasoningContent: reasoningTranscripts.length > 0 ? JSON.stringify(reasoningTranscripts) : undefined,
+		const redactedResult = redactInspectionResult(result);
+		const responseRedaction = redactText(responseContent);
+		const reasoningRedaction = reasoningContent == null ? undefined : redactText(reasoningContent);
+		await lockHeartbeat;
+		await persistInspectionResult(runId, userId, projectId, schedule, redactedResult.value, inputRedactions + redactedResult.count + responseRedaction.count + (reasoningRedaction?.count ?? 0), lockAt, {
+			requestPayload: { runs: logPayloads },
+			responseContent: responseRedaction.value,
+			reasoningContent: reasoningRedaction?.value,
 		});
 		recordInspectionStage(projectId, trigger, {
 			stage: "succeeded",
@@ -358,8 +432,7 @@ async function executeInspection(
 		const failedAt = new Date();
 		const message = redactText(error instanceof Error ? error.message : String(error)).value.slice(0, 1000);
 		if (logPayloads.length > 0) {
-			// Best-effort transcript for a failed run; the metadata write below is the source of truth.
-			await db.insert(projectInspectionLogs).values({ inspectionId: runId, requestPayload: { batches: logPayloads } })
+			await db.insert(projectInspectionLogs).values({ inspectionId: runId, requestPayload: { runs: logPayloads } })
 				.onConflictDoNothing().catch(() => undefined);
 			await pruneInspectionLogs(userId, projectId).catch(() => undefined);
 		}
@@ -371,10 +444,6 @@ async function executeInspection(
 		});
 		await Promise.all([
 			db.update(projectInspections).set({ status: "failed", error: message, finishedAt: failedAt }).where(eq(projectInspections.id, runId)),
-			// Release the lock and reschedule the retry at the configured
-			// schedule's next slot (never the lock TTL). The lockedAt guard keeps
-			// a stale run from clearing a newer claim that took over after this
-			// lock expired.
 			db.update(projectAnalysisStates).set({
 				lockedAt: null,
 				lastError: message,
@@ -383,7 +452,7 @@ async function executeInspection(
 			}).where(and(
 				eq(projectAnalysisStates.userId, userId),
 				eq(projectAnalysisStates.projectId, projectId),
-				eq(projectAnalysisStates.lockedAt, claimedAt),
+				eq(projectAnalysisStates.lockedAt, lockAt),
 			)),
 		]);
 		publish({ type: "project_update", userId, projectId });
@@ -472,7 +541,8 @@ async function persistInspectionResult(
 				version: 1,
 				kind: memory.kind,
 				content: memory.content,
-				status: "candidate",
+				// The model parser only admits directly evidenced high-confidence memories.
+				status: "confirmed",
 				moduleIds: memory.moduleIds,
 				evidence: memory.evidence.filter(validEvidence),
 				sourceInspectionId: runId,
@@ -543,6 +613,70 @@ export function retainStructureModuleIds(
 	}));
 }
 
+/** Strictly empty session metadata, excluding mandatory transport fields (user, machine, cwd). */
+export function isStrictlyEmptyUuidSession(record: {
+	id: string;
+	title: string | null;
+	branch: string | null;
+	modelId: string | null;
+	turnCount: number;
+	totalCostUsd: number;
+	inputTokens: number;
+	cacheReadTokens: number;
+	totalTokens: number;
+	contextTokens: number;
+	contextWindow: number;
+}): boolean {
+	return new RegExp(EMPTY_SESSION_ID, "i").test(record.id)
+		&& record.title === null
+		&& record.branch === null
+		&& record.modelId === null
+		&& record.turnCount === 0
+		&& record.totalCostUsd === 0
+		&& record.inputTokens === 0
+		&& record.cacheReadTokens === 0
+		&& record.totalTokens === 0
+		&& record.contextTokens === 0
+		&& record.contextWindow === 0;
+}
+
+async function cleanEmptyUuidSessions(): Promise<void> {
+	try {
+		const cleared = await sweepEmptyUuidSessions();
+		if (cleared.length > 0) process.stderr.write(`[pi-kanban] inspection removed ${cleared.length} empty session(s): ${cleared.join(", ")}\n`);
+	} catch (error) {
+		process.stderr.write(`[pi-kanban] inspection empty-session cleanup failed: ${error instanceof Error ? error.message : String(error)}\n`);
+	}
+}
+
+/** Remove stale UUID placeholder sessions only when neither content nor project artifacts exist. */
+export async function sweepEmptyUuidSessions(): Promise<string[]> {
+	const cutoff = new Date(Date.now() - EMPTY_SESSION_RETENTION_MS);
+	const predicate = and(
+		sql`${sessions.id} ~ ${EMPTY_SESSION_ID}`,
+		isNull(sessions.title),
+		isNull(sessions.branch),
+		isNull(sessions.modelId),
+		eq(sessions.turnCount, 0),
+		eq(sessions.totalCostUsd, 0),
+		eq(sessions.inputTokens, 0),
+		eq(sessions.cacheReadTokens, 0),
+		eq(sessions.totalTokens, 0),
+		eq(sessions.contextTokens, 0),
+		eq(sessions.contextWindow, 0),
+		lt(sessions.lastActivityAt, cutoff),
+		sql`${sessions.state} in ('finished', 'offline')`,
+		sql`not exists (select 1 from ${turns} where ${turns.sessionId} = ${sessions.id})`,
+		sql`not exists (select 1 from ${messages} where ${messages.sessionId} = ${sessions.id})`,
+		sql`not exists (select 1 from ${toolCalls} where ${toolCalls.sessionId} = ${sessions.id})`,
+		sql`not exists (select 1 from ${todoLists} where ${todoLists.sessionId} = ${sessions.id})`,
+		sql`not exists (select 1 from ${approvals} where ${approvals.sessionId} = ${sessions.id})`,
+		sql`not exists (select 1 from ${projectSnapshots} where ${projectSnapshots.sessionId} = ${sessions.id})`,
+	);
+	const removed = await db.delete(sessions).where(predicate).returning({ id: sessions.id });
+	return removed.map((session) => session.id);
+}
+
 export function toMemoryDto(row: typeof projectMemories.$inferSelect): ProjectMemoryDTO {
 	return {
 		id: row.memoryKey,
@@ -603,7 +737,7 @@ function normalizeMemory(value: string): string {
 	return value.trim().toLocaleLowerCase();
 }
 
-function toRedactable(value: Record<string, unknown>): Redactable {
+function toRedactable(value: unknown): Redactable {
 	try {
 		return JSON.parse(JSON.stringify(value)) as Redactable;
 	} catch {
