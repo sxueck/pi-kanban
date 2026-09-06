@@ -16,6 +16,26 @@ import type { MsgKey } from "../i18n.js";
 import { InspectionLogPanel } from "./InspectionLogs.js";
 import { EmptyHistoryIllustration } from "../components/illustrations.js";
 
+const EMPTY_PROJECT_COVERAGE: ProjectWorkDTO["coverage"] = {
+	totalFiles: 0,
+	readFiles: 0,
+	highConfidenceMemories: 0,
+};
+
+const STRUCTURE_KINDS = new Set(["project", "module"]);
+
+/** Walk the parent chain: insight nodes belong to their module ancestor, if any. */
+function insightModuleId(node: ProjectTreeNodeDTO, byId: Map<string, ProjectTreeNodeDTO>): string | undefined {
+	let cursor = node.parentId;
+	while (cursor) {
+		const parent = byId.get(cursor);
+		if (!parent || parent.kind === "project") return undefined;
+		if (parent.kind === "module") return parent.id;
+		cursor = parent.parentId;
+	}
+	return undefined;
+}
+
 export function History() {
 	const { t } = useI18n();
 	const { data, error, loading } = useResource<ProjectHistoryDTO[]>("/api/history");
@@ -74,7 +94,26 @@ export function ProjectSessions() {
 		const updated = updatedMemories[memory.id];
 		return updated && updated.version > memory.version ? updated : memory;
 	}) ?? [];
+	const coverage = work?.coverage ?? EMPTY_PROJECT_COVERAGE;
 	const selectedModule = work?.tree.find((node) => node.id === selectedModuleId && node.kind === "module");
+	// The tree card shows structure only; inspection insights surface in module
+	// details, or in the memories card when they are not linked to any module.
+	const treeNodes = work?.tree ?? [];
+	const nodeById = new Map(treeNodes.map((node) => [node.id, node]));
+	const structureNodes = treeNodes.filter((node) => STRUCTURE_KINDS.has(node.kind));
+	const moduleInsights = new Map<string, ProjectTreeNodeDTO[]>();
+	const rootInsights: ProjectTreeNodeDTO[] = [];
+	for (const node of treeNodes) {
+		if (STRUCTURE_KINDS.has(node.kind)) continue;
+		const moduleId = insightModuleId(node, nodeById);
+		if (!moduleId) {
+			rootInsights.push(node);
+			continue;
+		}
+		const list = moduleInsights.get(moduleId) ?? [];
+		list.push(node);
+		moduleInsights.set(moduleId, list);
+	}
 
 	async function setStatus(memoryId: string, status: ProjectMemoryStatus) {
 		if (!id || pendingRequests.current.has(memoryId)) return;
@@ -116,7 +155,7 @@ export function ProjectSessions() {
 				</header>
 				{sessionsError && <div className="error">{apiErrorMessage(sessionsError)}</div>}
 				<div className={`project-work-main${work ? " has-tree" : ""}`}>
-					{work && <TreeCard nodes={work.tree} selectedNodeId={selectedModule?.id} onSelect={setSelectedModuleId} />}
+					{work && <TreeCard nodes={structureNodes} coverage={coverage} selectedNodeId={selectedModule?.id} onSelect={setSelectedModuleId} />}
 					<div className="project-sessions">
 						{!sessionsError && !sessions && <div className="empty">{t("common.loading")}</div>}
 						{sessions && sessions.length === 0 && (
@@ -140,7 +179,7 @@ export function ProjectSessions() {
 									{sessions.map((s) => (
 										<tr key={s.id}>
 											<td>
-												<Link to={`/sessions/${s.id}`}>{s.title ?? s.id}</Link>
+												<Link to={`/sessions/${s.id}`} title={s.title ?? s.id}>{s.title ?? s.id}</Link>
 											</td>
 											<td className={`status-${s.state}`}>{t(`state.${s.state}` as MsgKey)}</td>
 											<td>{s.turnCount}</td>
@@ -170,6 +209,7 @@ export function ProjectSessions() {
 					{selectedModule && (
 						<ModuleDetails
 							node={selectedModule}
+							insights={moduleInsights.get(selectedModule.id) ?? []}
 							memories={memories}
 							sessions={sessions ?? []}
 							pending={pendingMemories}
@@ -178,6 +218,7 @@ export function ProjectSessions() {
 					)}
 					<MemoriesCard
 						memories={memories}
+						insights={rootInsights}
 						pending={pendingMemories}
 						filter={memoryFilter}
 						onFilter={setMemoryFilter}
@@ -239,8 +280,9 @@ export function InspectionCard({ inspection, snapshotUpdatedAt, busy, onInspect,
 const MEMORY_FILTERS: Array<ProjectMemoryStatus | "all"> = ["all", "candidate", "confirmed", "pinned", "archived"];
 const MEMORY_KIND_ORDER: ProjectMemoryKind[] = ["decision", "fact", "preference", "pattern", "issue"];
 
-export function MemoriesCard({ memories, pending, filter, onFilter, onStatus }: {
+export function MemoriesCard({ memories, insights, pending, filter, onFilter, onStatus }: {
 	memories: ProjectMemoryDTO[];
+	insights: ProjectTreeNodeDTO[];
 	pending: Set<string>;
 	filter: ProjectMemoryStatus | "all";
 	onFilter: (filter: ProjectMemoryStatus | "all") => void;
@@ -293,10 +335,11 @@ export function MemoriesCard({ memories, pending, filter, onFilter, onStatus }: 
 						))}
 					</div>
 					<div className="memory-scroll">
-						{filtered.length === 0 ? (
+						{filtered.length === 0 && insights.length === 0 ? (
 							<p className="muted">{t("work.memory.empty")}</p>
 						) : (
-							groups.map((group) => (
+							<>
+							{groups.map((group) => (
 								<div key={group.kind} className="memory-group">
 									<h3 className="memory-group-title">
 										{t(`memory.kind.${group.kind}` as MsgKey)}
@@ -308,12 +351,45 @@ export function MemoriesCard({ memories, pending, filter, onFilter, onStatus }: 
 										))}
 									</ul>
 								</div>
-							))
+							))}
+							{insights.length > 0 && (
+								<div className="memory-group">
+									<h3 className="memory-group-title">
+										{t("work.insights")}
+										<span className="count">{insights.length}</span>
+									</h3>
+									<ul className="memory-list insight-list">
+										{insights.map((node) => (
+											<InsightItem key={node.id} node={node} />
+										))}
+									</ul>
+								</div>
+							)}
+							</>
 						)}
 					</div>
 				</>
 			)}
 		</section>
+	);
+}
+
+function InsightItem({ node }: { node: ProjectTreeNodeDTO }) {
+	const { t } = useI18n();
+	return (
+		<li className={`insight-item severity-${node.severity ?? "info"}`}>
+			<div className="insight-head">
+				<span className="work-kind">{t(`tree.kind.${node.kind}` as MsgKey)}</span>
+				{node.sessionId ? (
+					<Link className="insight-label" to={`/sessions/${node.sessionId}`} title={node.sessionId}>
+						{node.label}
+					</Link>
+				) : (
+					<span className="insight-label">{node.label}</span>
+				)}
+			</div>
+			{node.detail && <p className="work-detail">{node.detail}</p>}
+		</li>
 	);
 }
 
@@ -371,8 +447,9 @@ function MemoryItem({ memory, busy, onStatus }: { memory: ProjectMemoryDTO; busy
 	);
 }
 
-export function ModuleDetails({ node, memories, sessions, pending, onStatus }: {
+export function ModuleDetails({ node, insights, memories, sessions, pending, onStatus }: {
 	node: ProjectTreeNodeDTO;
+	insights: ProjectTreeNodeDTO[];
 	memories: ProjectMemoryDTO[];
 	sessions: HistorySessionDTO[];
 	pending: Set<string>;
@@ -392,7 +469,7 @@ export function ModuleDetails({ node, memories, sessions, pending, onStatus }: {
 				<h2>{t("module.details")}</h2>
 			</header>
 			<p className="module-name">{node.label}</p>
-			{linkedMemories.length === 0 && <p className="muted">{t("module.empty")}</p>}
+			{linkedMemories.length === 0 && insights.length === 0 && <p className="muted">{t("module.empty")}</p>}
 			{linkedSessions.length > 0 && (
 				<div className="module-section">
 					<h3>{t("module.sessions")}</h3>
@@ -415,16 +492,28 @@ export function ModuleDetails({ node, memories, sessions, pending, onStatus }: {
 					</ul>
 				</div>
 			)}
+			{insights.length > 0 && (
+				<div className="module-section">
+					<h3>{t("work.insights")}</h3>
+					<ul className="memory-list insight-list">
+						{insights.map((insight) => (
+							<InsightItem key={insight.id} node={insight} />
+						))}
+					</ul>
+				</div>
+			)}
 		</section>
 	);
 }
 
-function TreeCard({ nodes, selectedNodeId, onSelect }: {
+function TreeCard({ nodes, coverage, selectedNodeId, onSelect }: {
 	nodes: ProjectTreeNodeDTO[];
+	coverage: ProjectWorkDTO["coverage"];
 	selectedNodeId?: string;
 	onSelect: (nodeId: string) => void;
 }) {
 	const { t } = useI18n();
+	const moduleCount = nodes.reduce((total, node) => total + (node.kind === "module" ? 1 : 0), 0);
 	// Bucket once; parents missing from the payload collapse to the root level.
 	const byParent = useMemo(() => {
 		const ids = new Set(nodes.map((n) => n.id));
@@ -440,11 +529,20 @@ function TreeCard({ nodes, selectedNodeId, onSelect }: {
 	return (
 		<section className="board-section tree-section tree-explorer" aria-label={t("work.tree")}>
 			<header>
-				<h2>{t("work.tree")}</h2>
-				<span className="count">{nodes.length}</span>
+				<div>
+					<h2>{t("work.tree")}</h2>
+					<p className="tree-coverage-summary">
+						{coverage.totalFiles > 0
+							? t("work.coverage.files", { read: coverage.readFiles, total: coverage.totalFiles })
+							: t("work.coverage.none")}
+						<span>·</span>
+						{t("work.coverage.memories", { n: coverage.highConfidenceMemories })}
+					</p>
+				</div>
+				{moduleCount > 0 && <span className="count">{moduleCount}</span>}
 			</header>
 			<div className="tree-explorer-scroll">
-				{nodes.length === 0 ? (
+				{moduleCount === 0 ? (
 					<p className="muted">{t("work.tree.empty")}</p>
 				) : (
 					<TreeLevel byParent={byParent} parentId={null} selectedNodeId={selectedNodeId} onSelect={onSelect} />
@@ -487,6 +585,7 @@ function TreeLevel({ byParent, parentId, depth = 0, selectedNodeId, onSelect }: 
 									<span className="work-label">{node.label}</span>
 								)}
 							</summary>
+							{node.coverage && node.coverage.totalFiles > 0 && <span className="work-coverage">{t("work.coverage.files", { read: node.coverage.readFiles, total: node.coverage.totalFiles })}</span>}
 							{node.detail && <p className="work-detail">{node.detail}</p>}
 							<TreeLevel byParent={byParent} parentId={node.id} depth={depth + 1} selectedNodeId={selectedNodeId} onSelect={onSelect} />
 						</details>

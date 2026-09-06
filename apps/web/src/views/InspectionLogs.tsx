@@ -55,7 +55,9 @@ export function InspectionLogPanel({ projectId, onClose }: { projectId: number; 
 			`${API_BASE}/api/projects/${projectId}/inspection-log/stream?token=${encodeURIComponent(getToken())}`,
 		);
 		const onRun = (event: MessageEvent) => {
-			setRun(JSON.parse(event.data as string) as RunEnvelope);
+			const nextRun = parseSseJson<RunEnvelope>(event);
+			if (!nextRun) return;
+			setRun(nextRun);
 			// Every (re)connect replays the full timeline after this envelope;
 			// drop the previous connection's copy so nothing renders twice.
 			pendingText.current = { reasoning: "", content: "" };
@@ -63,16 +65,19 @@ export function InspectionLogPanel({ projectId, onClose }: { projectId: number; 
 			setLiveText({ reasoning: "", content: "" });
 		};
 		const onSnapshot = (event: MessageEvent) => {
-			const snapshot = JSON.parse(event.data as string) as { reasoning?: string; content?: string };
+			const snapshot = parseSseJson<{ reasoning?: string; content?: string }>(event);
+			if (!snapshot) return;
 			pendingText.current = { reasoning: snapshot.reasoning ?? "", content: snapshot.content ?? "" };
 			flushLiveText();
 		};
 		const onDelta = (event: MessageEvent) => {
-			const delta = JSON.parse(event.data as string) as { type: "reasoning" | "content"; text: string };
+			const delta = parseSseJson<{ type: "reasoning" | "content"; text: string }>(event);
+			if (!delta) return;
 			pendingText.current = appendLiveDelta(pendingText.current, delta);
 		};
 		const onStage = (event: MessageEvent) => {
-			const stage = JSON.parse(event.data as string) as InspectionStageEvent;
+			const stage = parseSseJson<InspectionStageEvent>(event);
+			if (!stage) return;
 			setStages((current) => [...current, stage]);
 			if (stage.stage === "succeeded" || stage.stage === "failed") {
 				// The persisted transcript commits before its finish stage is
@@ -247,10 +252,26 @@ function describeStage(stage: InspectionStageEvent, t: (key: MsgKey, params?: Re
 			});
 		case "request_sent":
 			return t("logs.stage.request_sent", { model: stage.model, s: Math.round(stage.timeoutMs / 1000) });
+		case "tool_completed":
+			return t("logs.stage.tool_completed", {
+				round: stage.round,
+				tool: stage.tool,
+				status: stage.status,
+				kb: Math.max(1, Math.round(stage.resultBytes / 1024)),
+				n: stage.redactions,
+			});
 		case "succeeded":
 			return t("logs.stage.succeeded", { m: stage.memories, k: stage.treeNodes, s: Math.round(stage.elapsedMs / 1000) });
 		case "failed":
 			return t("logs.stage.failed", { s: Math.round(stage.elapsedMs / 1000), error: stage.error.slice(0, 200) });
+	}
+}
+
+function parseSseJson<T>(event: MessageEvent): T | null {
+	try {
+		return JSON.parse(String(event.data)) as T;
+	} catch {
+		return null;
 	}
 }
 

@@ -990,6 +990,16 @@ font-size: 12px;
 	margin-top: 10px;
 }
 
+a,
+button,
+summary,
+[role="button"],
+[role="radio"],
+[role="switch"] {
+	-webkit-user-select: none;
+	user-select: none;
+}
+
 button {
 	cursor: pointer;
 	border-radius: 999px;
@@ -2567,30 +2577,21 @@ overflow: auto;
 
 /* project work rail ------------------------------------------------------------- */
 
-/* one shared bordered group: inspection + memories + tree */
+/* Keep project-learning panels distinct without introducing a filled card background. */
 .rail-group {
 	display: flex;
 	flex-direction: column;
-	max-height: calc(100vh - 32px);
-	background: var(--bg-card);
-	border: 1px solid var(--border);
-	border-radius: var(--radius);
-	box-shadow: var(--shadow-card);
-	overflow: hidden;
+	gap: 12px;
 }
 
 .rail-group-item {
 	min-height: 0;
-	border-bottom: 1px solid var(--border);
-}
-
-.rail-group-item:last-child {
-	border-bottom: 0;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius);
 }
 
 .rail-group .rail-card {
 	background: transparent;
-	border-radius: 0;
 	box-shadow: none;
 	flex-shrink: 0;
 }
@@ -2608,6 +2609,7 @@ overflow: auto;
 	display: flex;
 	flex-direction: column;
 	min-height: 320px;
+	max-height: min(50vh, 620px);
 	overflow: hidden;
 }
 
@@ -2618,7 +2620,17 @@ overflow: auto;
 
 .memories-section > header,
 .memories-section > .board-chips {
-	flex-shrink: 0;
+flex-shrink: 0;
+}
+
+/* five filter chips must fit the 420px rail without wrapping */
+.memories-section .board-chips {
+gap: 4px;
+}
+
+.memories-section .board-chips button {
+padding: 4px 10px;
+font-size: 12px;
 }
 
 .memory-scroll {
@@ -2646,9 +2658,39 @@ overflow: auto;
 }
 
 .memory-group-title .count {
-	font-weight: 500;
-	text-transform: none;
-	letter-spacing: 0;
+font-weight: 500;
+text-transform: none;
+letter-spacing: 0;
+}
+
+/* inspection insight rows (module details + memories card fallback group) */
+.insight-item {
+padding: 6px 0 7px;
+}
+
+.insight-head {
+display: flex;
+align-items: baseline;
+gap: 6px;
+}
+
+.insight-label {
+min-width: 0;
+font-size: 12.5px;
+overflow-wrap: anywhere;
+}
+
+.insight-item.severity-warning .insight-label {
+color: var(--waiting);
+}
+
+.insight-item.severity-error .insight-label {
+color: var(--error);
+}
+
+.insight-item .work-detail {
+margin: 2px 0 0;
+padding-left: 0;
 }
 
 /* project detail: VSCode-style structure tree beside the sessions table */
@@ -2671,6 +2713,19 @@ overflow: auto;
 	flex-direction: column;
 	max-height: calc(100vh - 32px);
 	margin-bottom: 0;
+	padding: 14px 16px 16px;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius);
+}
+
+.tree-coverage-summary {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 5px;
+	margin: 3px 0 0;
+	color: var(--fg-muted);
+	font-size: 11px;
+	font-weight: 500;
 }
 
 .tree-explorer-scroll {
@@ -2774,6 +2829,15 @@ details[open] > summary .tree-twisty {
 
 .work-node.severity-error .work-label {
 	color: var(--error);
+}
+
+.work-coverage {
+	display: block;
+	margin: 1px 0 3px;
+	padding-left: 26px;
+	color: var(--fg-faint);
+	font-size: 10.5px;
+	font-variant-numeric: tabular-nums;
 }
 
 .work-detail {

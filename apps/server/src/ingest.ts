@@ -20,7 +20,7 @@ import {
 	turns,
 } from "./db/schema.js";
 import { publish } from "./bus.js";
-import { buildStructureTree } from "./project-tree.js";
+import { mergeSnapshotTree } from "./project-tree.js";
 
 export interface ConnContext {
 	machineId: string;
@@ -356,19 +356,27 @@ async function onProjectSnapshot(
 			createdAt: new Date(createdAtMs),
 		})
 		.onConflictDoNothing({ target: [projectSnapshots.userId, projectSnapshots.projectId, projectSnapshots.snapshotHash] });
+	const [analysisState] = await db
+		.select({ latestTree: projectAnalysisStates.latestTree })
+		.from(projectAnalysisStates)
+		.where(and(eq(projectAnalysisStates.userId, conn.userId), eq(projectAnalysisStates.projectId, session.projectId)))
+		.limit(1);
+	// Fresh structure + preserved inspection insights: a snapshot must not
+	// wipe the insight nodes the last inspection merged into latestTree.
+	const latestTree = mergeSnapshotTree(analysisState?.latestTree, files, project.name);
 	await db
 		.insert(projectAnalysisStates)
 		.values({
 			userId: conn.userId,
 			projectId: session.projectId,
 			nextInspectionAt: new Date(),
-			latestTree: buildStructureTree(files, project.name),
+			latestTree,
 		})
 		.onConflictDoUpdate({
 			target: [projectAnalysisStates.userId, projectAnalysisStates.projectId],
 			set: {
 				nextInspectionAt: new Date(),
-				latestTree: buildStructureTree(files, project.name),
+				latestTree,
 				updatedAt: new Date(),
 			},
 		});

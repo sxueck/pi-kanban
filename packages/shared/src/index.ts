@@ -369,6 +369,14 @@ export interface ProjectTreeNodeDTO {
 	severity?: "info" | "warning" | "error";
 	sessionId?: string;
 	turnPosition?: number;
+	/** Snapshot files under this structural node and files read in project sessions. */
+	coverage?: { totalFiles: number; readFiles: number };
+}
+
+export interface ProjectCoverageDTO {
+	totalFiles: number;
+	readFiles: number;
+	highConfidenceMemories: number;
 }
 
 export interface ProjectInspectionDTO {
@@ -384,6 +392,7 @@ export interface ProjectInspectionDTO {
 export type InspectionStageEvent =
 	| { stage: "assembled"; inspectionId: string; bytes: number; redactions: number; omitted: Record<string, number> }
 	| { stage: "request_sent"; inspectionId: string; model: string; timeoutMs: number }
+	| { stage: "tool_completed"; inspectionId: string; tool: string; round: number; status: "completed" | "rejected"; resultBytes: number; redactions: number }
 	| { stage: "succeeded"; inspectionId: string; memories: number; treeNodes: number; elapsedMs: number }
 	| { stage: "failed"; inspectionId: string; error: string; elapsedMs: number };
 
@@ -432,6 +441,7 @@ export interface ProjectWorkDTO {
 	project: { id: number; name: string; gitRemote?: string };
 	memories: ProjectMemoryDTO[];
 	tree: ProjectTreeNodeDTO[];
+	coverage: ProjectCoverageDTO;
 	inspection: ProjectInspectionDTO;
 	snapshotUpdatedAt?: number;
 }
