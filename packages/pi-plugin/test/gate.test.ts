@@ -237,6 +237,51 @@ const tests: Array<[string, () => Promise<void>]> = [
 		},
 	],
 	[
+		"interactive rule (ask_user): no local confirm, straight to cloud; approval lets it run",
+		async () => {
+			const transport = new FakeTransport();
+			transport.connected = true;
+			const { ctx, confirmCalls } = makeCtx(true, true);
+			const pending = runGate(
+				{
+					gate: makeGate({ rules: [{ tool: "ask_user", label: "ask user", interactive: true }] }),
+					transport,
+					getSessionId: () => "s1",
+					getTurnPosition: () => 1,
+				},
+				{ toolName: "ask_user", toolCallId: "tc-a", input: { questions: [] } },
+				ctx,
+			);
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			assert.equal(confirmCalls(), 0, "interactive rules must not double-prompt locally");
+			assert.equal(transport.requests.length, 1);
+			assert.equal(transport.requests[0].toolName, "ask_user");
+			transport.decisionSink!("approved");
+			assert.equal(await pending, undefined);
+		},
+	],
+	[
+		"interactive rule (ask_user): cloud deny blocks the call so the session unsticks",
+		async () => {
+			const transport = new FakeTransport();
+			transport.connected = true;
+			const { ctx } = makeCtx(false);
+			const pending = runGate(
+				{
+					gate: makeGate({ rules: [{ tool: "ask_user", label: "ask user", interactive: true }] }),
+					transport,
+					getSessionId: () => "s1",
+					getTurnPosition: () => 1,
+				},
+				{ toolName: "ask_user", toolCallId: "tc-b", input: { questions: [] } },
+				ctx,
+			);
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			transport.decisionSink!("denied");
+			assert.deepEqual(await pending, { block: true, reason: "Denied (ask user)" });
+		},
+	],
+	[
 		"real Transport: concurrent approval requests keep their own IDs",
 		async () => {
 			const originalWebSocket = globalThis.WebSocket;

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "";
+export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "";
 export const UNAUTHORIZED_EVENT = "pi-kanban:unauthorized";
 
 export function getToken(): string {
@@ -90,8 +90,53 @@ export class UnauthorizedError extends Error {
 	}
 }
 
+type RefreshListener = () => void;
+
+interface EventSourceLike {
+	addEventListener(type: string, listener: EventListener): void;
+	close(): void;
+}
+
+type IntervalHandle = ReturnType<typeof setInterval>;
+
+export function createResourceUpdateChannel(
+	openEventSource: () => EventSourceLike,
+	startPolling: (listener: RefreshListener) => IntervalHandle = (listener) => setInterval(listener, 15_000),
+	stopPolling: (handle: IntervalHandle) => void = clearInterval,
+): { subscribe(listener: RefreshListener): () => void } {
+	const listeners = new Set<RefreshListener>();
+	let source: EventSourceLike | undefined;
+	let polling: IntervalHandle | undefined;
+	const refresh = () => {
+		for (const listener of listeners) listener();
+	};
+
+	return {
+		subscribe(listener) {
+			const subscription = () => listener();
+			listeners.add(subscription);
+			if (listeners.size === 1) {
+				source = openEventSource();
+				source.addEventListener("update", refresh as EventListener);
+				polling = startPolling(refresh);
+			}
+			return () => {
+				if (!listeners.delete(subscription) || listeners.size !== 0) return;
+				source?.close();
+				source = undefined;
+				if (polling !== undefined) stopPolling(polling);
+				polling = undefined;
+			};
+		},
+	};
+}
+
+const resourceUpdates = createResourceUpdateChannel(
+	() => new EventSource(`${API_BASE}/api/events?token=${encodeURIComponent(getToken())}`),
+);
+
 /**
- * Fetch a resource, refresh it on SSE updates and a slow polling fallback.
+ * Fetch a resource, refresh it on shared SSE updates and a slow polling fallback.
  * Re-fetches whenever `refreshKey` changes (used after mutations).
  */
 export function useResource<T>(path: string | null, refreshKey = 0): {
@@ -136,16 +181,11 @@ export function useResource<T>(path: string | null, refreshKey = 0): {
 		};
 	}, [path, version, refreshKey]);
 
-	// SSE-driven refresh + polling fallback.
+	// One app-wide stream refreshes all mounted resources without consuming one
+	// long-lived HTTP connection per resource.
 	useEffect(() => {
 		if (!path) return;
-		const source = new EventSource(`${API_BASE}/api/events?token=${encodeURIComponent(getToken())}`);
-		source.addEventListener("update", refetch);
-		const poll = setInterval(refetch, 15_000);
-		return () => {
-			source.close();
-			clearInterval(poll);
-		};
+		return resourceUpdates.subscribe(refetch);
 	}, [path, refetch]);
 
 	return { data, error, loading };

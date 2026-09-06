@@ -10,7 +10,7 @@
 		"db:studio": "pnpm --filter @pi-kanban/server db:studio",
 		"plugin:build": "pnpm --filter @pi-kanban/plugin build",
 		"plugin:install": "pnpm --filter @pi-kanban/plugin install-ext",
-		"test": "pnpm --filter @pi-kanban/server test && pnpm --filter @pi-kanban/plugin test",
+		"test": "pnpm --filter @pi-kanban/server test && pnpm --filter @pi-kanban/web test && pnpm --filter @pi-kanban/plugin test",
 		"build": "pnpm -r build",
 		"typecheck": "pnpm -r typecheck"
 	},

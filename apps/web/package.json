@@ -7,6 +7,9 @@
 		"dev": "vite",
 		"build": "tsc --noEmit && vite build",
 		"typecheck": "tsc --noEmit",
+		"test:project-memory": "node test/run-project-memory.mjs",
+		"test": "node test/run-project-memory.mjs && node test/run-resource-updates.mjs",
+		"test:resource-updates": "node test/run-resource-updates.mjs",
 		"preview": "vite preview"
 	},
 	"dependencies": {

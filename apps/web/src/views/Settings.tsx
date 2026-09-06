@@ -19,6 +19,19 @@ const THEME_OPTIONS: Array<{ value: ThemePref; key: "light" | "dark" | "system" 
 ];
 
 const INTERVAL_MINUTES = [5, 15, 30, 60, 180, 360, 1440];
+/** Monday-first display order; values are Date.getDay() day numbers. */
+const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
+/** 2024-01-07 is a Sunday, so day d maps to a real date for Intl formatting. */
+const WEEKDAY_ANCHOR = new Date(2024, 0, 7);
+
+function minutesToTime(minutes: number): string {
+	return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+}
+
+function timeToMinutes(value: string): number {
+	const [hours, minutes] = value.split(":").map(Number);
+	return hours * 60 + minutes;
+}
 
 interface MeResponse {
 	user: UserDTO;
@@ -102,7 +115,7 @@ export function Settings() {
  * starts empty and an empty submit keeps the saved key.
  */
 function ModelSettingsSection() {
-	const { t } = useI18n();
+	const { t, locale } = useI18n();
 	const [refreshKey, setRefreshKey] = useState(0);
 	const { data, error, loading } = useResource<ModelSettingsDTO>("/api/settings/model", refreshKey);
 	const [baseUrl, setBaseUrl] = useState("");
@@ -110,6 +123,9 @@ function ModelSettingsSection() {
 	const [apiKey, setApiKey] = useState("");
 	const [enabled, setEnabled] = useState(false);
 	const [intervalMinutes, setIntervalMinutes] = useState(60);
+	const [windowStart, setWindowStart] = useState("00:00");
+	const [windowEnd, setWindowEnd] = useState("23:59");
+	const [weekdays, setWeekdays] = useState<Set<number>>(new Set(WEEKDAY_ORDER));
 	const [dirty, setDirty] = useState(false);
 	const [busy, setBusy] = useState(false);
 	const [saveError, setSaveError] = useState<string | null>(null);
@@ -124,6 +140,9 @@ function ModelSettingsSection() {
 		setModel(data.model);
 		setEnabled(data.enabled);
 		setIntervalMinutes(data.intervalMinutes);
+		setWindowStart(minutesToTime(data.windowStartMinute));
+		setWindowEnd(minutesToTime(data.windowEndMinute));
+		setWeekdays(new Set(data.weekdays));
 	}, [data, dirty]);
 
 	function markDirty() {
@@ -131,17 +150,41 @@ function ModelSettingsSection() {
 		setSaved(false);
 	}
 
+	function toggleWeekday(day: number) {
+		markDirty();
+		// The server rejects an empty weekday list; keep at least one day on.
+		setWeekdays((current) => {
+			if (current.size === 1 && current.has(day)) return current;
+			const next = new Set(current);
+			if (next.has(day)) next.delete(day);
+			else next.add(day);
+			return next;
+		});
+	}
+
+	const weekdayLabel = (day: number): string =>
+		new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en-US", { weekday: "short" }).format(
+			new Date(WEEKDAY_ANCHOR.getFullYear(), WEEKDAY_ANCHOR.getMonth(), WEEKDAY_ANCHOR.getDate() + day),
+		);
+
 	async function save(event: React.SyntheticEvent<HTMLFormElement>) {
 		event.preventDefault();
 		setBusy(true);
 		setSaveError(null);
 		setSaved(false);
 		const key = apiKey.trim();
+		if (!windowStart || !windowEnd) {
+			setSaveError(t("settings.model.windowInvalid"));
+			return;
+		}
 		const body: ModelSettingsInput = {
 			baseUrl: baseUrl.trim(),
 			model: model.trim(),
 			enabled,
 			intervalMinutes,
+			windowStartMinute: timeToMinutes(windowStart),
+			windowEndMinute: timeToMinutes(windowEnd),
+			weekdays: [...weekdays].sort((a, b) => a - b),
 			// Omitted → keep the current key on the server.
 			...(key ? { apiKey: key } : {}),
 		};
@@ -205,6 +248,16 @@ function ModelSettingsSection() {
 							aria-label={t("settings.model.apiKey")}
 							autoComplete="new-password"
 						/>
+						<button type="submit" disabled={busy}>{t("settings.model.save")}</button>
+					</form>
+					<p className="muted">{t("settings.model.apiKeyHint")}</p>
+					{saveError && <p className="error">{saveError}</p>}
+					{saved && <p className="model-saved">{t("settings.model.saved")}</p>}
+					<div className="setting-row">
+						<div>
+							<strong>{t("settings.model.interval")}</strong>
+							<p className="muted">{t("settings.model.scheduleHint")}</p>
+						</div>
 						<select
 							value={intervalMinutes}
 							onChange={(event) => { markDirty(); setIntervalMinutes(Number(event.target.value)); }}
@@ -216,11 +269,45 @@ function ModelSettingsSection() {
 								</option>
 							))}
 						</select>
-						<button type="submit" disabled={busy}>{t("settings.model.save")}</button>
-					</form>
-					<p className="muted">{t("settings.model.apiKeyHint")}</p>
-					{saveError && <p className="error">{saveError}</p>}
-					{saved && <p className="model-saved">{t("settings.model.saved")}</p>}
+					</div>
+					<div className="setting-row">
+						<div>
+							<strong>{t("settings.model.window")}</strong>
+						</div>
+						<div className="schedule-window">
+							<input
+								type="time"
+								value={windowStart}
+								onChange={(event) => { markDirty(); setWindowStart(event.target.value); }}
+								aria-label={t("settings.model.window")}
+							/>
+							<span className="muted" aria-hidden="true">–</span>
+							<input
+								type="time"
+								value={windowEnd}
+								onChange={(event) => { markDirty(); setWindowEnd(event.target.value); }}
+								aria-label={t("settings.model.window")}
+							/>
+						</div>
+					</div>
+					<div className="setting-row">
+						<div>
+							<strong>{t("settings.model.weekdays")}</strong>
+						</div>
+						<div className="seg weekday-seg" role="group" aria-label={t("settings.model.weekdays")}>
+							{WEEKDAY_ORDER.map((day) => (
+								<button
+									key={day}
+									type="button"
+									className={weekdays.has(day) ? "on" : ""}
+									aria-pressed={weekdays.has(day)}
+									onClick={() => toggleWeekday(day)}
+								>
+									{weekdayLabel(day)}
+								</button>
+							))}
+						</div>
+					</div>
 					<div className="setting-row">
 						<div>
 							<strong>{t("settings.model.enabled")}</strong>

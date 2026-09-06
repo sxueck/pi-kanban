@@ -339,6 +339,9 @@ export interface DailyStatDTO {
 export interface LifetimeStatDTO {
 	totalCostUsd: number;
 	totalTokens: number;
+	/** Distinct projects ever seen across all sessions. */
+	totalProjects: number;
+	totalSessions: number;
 }
 
 export type ProjectMemoryStatus = "candidate" | "confirmed" | "pinned" | "archived";
@@ -350,6 +353,7 @@ export interface ProjectMemoryDTO {
 	kind: ProjectMemoryKind;
 	content: string;
 	status: ProjectMemoryStatus;
+	moduleIds: string[];
 	evidence: Array<{ sessionId: string; turnPosition?: number }>;
 	createdAt: number;
 }
@@ -376,6 +380,54 @@ export interface ProjectInspectionDTO {
 	lastError?: string;
 }
 
+/** Live stage of an in-flight inspection run, streamed over SSE to the log panel. */
+export type InspectionStageEvent =
+	| { stage: "assembled"; inspectionId: string; bytes: number; redactions: number; omitted: Record<string, number> }
+	| { stage: "request_sent"; inspectionId: string; model: string; timeoutMs: number }
+	| { stage: "succeeded"; inspectionId: string; memories: number; treeNodes: number; elapsedMs: number }
+	| { stage: "failed"; inspectionId: string; error: string; elapsedMs: number };
+
+/** One streamed model token batch, forwarded verbatim to the log panel. */
+export interface InspectionDelta {
+	type: "reasoning" | "content";
+	text: string;
+}
+
+/** SSE delta event on the inspection-log stream. */
+export interface InspectionDeltaEvent extends InspectionDelta {
+	inspectionId: string;
+}
+
+/** Replay of the text buffered so far for a running inspection, sent on subscribe. */
+export interface InspectionSnapshotEvent {
+	inspectionId: string;
+	reasoning?: string;
+	content?: string;
+}
+
+/** One row of the inspection log history list. */
+export interface InspectionLogSummaryDTO {
+	inspectionId: string;
+	trigger: "manual" | "schedule";
+	status: string;
+	startedAt: number;
+	finishedAt?: number;
+	redactionCount: number;
+	/** A response never arrived (request failed or timed out). */
+	hasResponse: boolean;
+	hasReasoning: boolean;
+	error?: string;
+}
+
+/** Full transcript of one inspection run, as displayed by the log panel. */
+export interface InspectionLogDetailDTO {
+	inspection: InspectionLogSummaryDTO;
+	systemPrompt: string;
+	requestPayload: unknown;
+	responseContent?: string;
+	reasoningContent?: string;
+}
+
 export interface ProjectWorkDTO {
 	project: { id: number; name: string; gitRemote?: string };
 	memories: ProjectMemoryDTO[];
@@ -384,11 +436,66 @@ export interface ProjectWorkDTO {
 	snapshotUpdatedAt?: number;
 }
 
+/**
+ * Cron-like inspection schedule: the inspection repeats every intervalMinutes
+ * inside a per-day time window, on the selected weekdays. Times are minutes
+ * after local midnight; windowEndMinute is inclusive (23:59 spans the full day).
+ */
+export interface InspectionSchedule {
+	intervalMinutes: number;
+	windowStartMinute: number;
+	windowEndMinute: number;
+	/** Days of week the window is active, 0 = Sunday … 6 = Saturday (Date.getDay). */
+	weekdays: number[];
+}
+
+/**
+ * Earliest inspection slot at or after `from`: on each allowed day, slots
+ * restart at windowStart and repeat every intervalMinutes until windowEnd,
+ * evaluated in the machine's local time zone. `from` itself is a valid result
+ * (a run finishing exactly on a slot boundary does not wait another cycle).
+ */
+export function computeNextInspectionAt(schedule: InspectionSchedule, from: Date): Date {
+	const intervalMs = schedule.intervalMinutes * 60_000;
+	const allowed = new Set(schedule.weekdays);
+	for (let dayOffset = 0; dayOffset <= 8; dayOffset++) {
+		// 8 local-day iterations always cover at least one allowed weekday,
+		// even across DST transitions that shift the calendar day length.
+		const day = new Date(from.getFullYear(), from.getMonth(), from.getDate() + dayOffset);
+		if (!allowed.has(day.getDay())) continue;
+		const windowStart = minuteOfDay(day, schedule.windowStartMinute);
+		// windowEndMinute is inclusive; compare against the exclusive minute after
+		// it so a slot picked up by a late sweep at :00:30 still counts as in-window.
+		const windowEnd = minuteOfDay(day, schedule.windowEndMinute + 1);
+		if (from.getTime() >= windowEnd.getTime()) continue;
+		const steps = from.getTime() <= windowStart.getTime()
+			? 0
+			: Math.ceil((from.getTime() - windowStart.getTime()) / intervalMs);
+		const slot = new Date(windowStart.getTime() + steps * intervalMs);
+		if (slot.getTime() < windowEnd.getTime()) return slot;
+	}
+	// Unreachable when weekdays is non-empty (validated at the settings boundary).
+	return new Date(from.getTime() + intervalMs);
+}
+
+function minuteOfDay(midnight: Date, minutes: number): Date {
+	return new Date(
+		midnight.getFullYear(),
+		midnight.getMonth(),
+		midnight.getDate() + Math.floor(minutes / 1440),
+		Math.floor((minutes % 1440) / 60),
+		minutes % 60,
+	);
+}
+
 export interface ModelSettingsDTO {
 	baseUrl: string;
 	model: string;
 	enabled: boolean;
 	intervalMinutes: number;
+	windowStartMinute: number;
+	windowEndMinute: number;
+	weekdays: number[];
 	hasApiKey: boolean;
 	updatedAt?: number;
 }
@@ -398,6 +505,9 @@ export interface ModelSettingsInput {
 	model: string;
 	enabled: boolean;
 	intervalMinutes: number;
+	windowStartMinute: number;
+	windowEndMinute: number;
+	weekdays: number[];
 	/** Omit to keep the current key; an empty value clears it. */
 	apiKey?: string;
 }
@@ -476,6 +586,14 @@ export interface GateRule {
 	/** Regex flags for `match` (default "" — substring semantics via RegExp, i ). */
 	flags?: string;
 	label: string;
+	/**
+	 * Interactive tool (ask-user style): it already prompts at the TUI itself,
+	 * so the gate skips its redundant local confirm and submits straight to the
+	 * cloud approval queue. The tool_call hook fires for every tool — built-in
+	 * or from any other extension — so covering a new blocking plugin is a rule
+	 * here, not per-plugin code.
+	 */
+	interactive?: boolean;
 }
 
 export interface GateConfig {

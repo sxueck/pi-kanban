@@ -1,6 +1,11 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { eq, isNull, sql } from "drizzle-orm";
-import type { ModelSettingsDTO, ModelSettingsInput } from "@pi-kanban/shared";
+import { eq, isNull } from "drizzle-orm";
+import {
+	computeNextInspectionAt,
+	type InspectionSchedule,
+	type ModelSettingsDTO,
+	type ModelSettingsInput,
+} from "@pi-kanban/shared";
 import { db } from "./db/index.js";
 import { modelSettings, projectAnalysisStates } from "./db/schema.js";
 
@@ -9,6 +14,7 @@ const MIN_INTERVAL_MINUTES = 5;
 const MAX_INTERVAL_MINUTES = 24 * 60;
 const INTERVAL_OPTIONS = new Set([5, 15, 30, 60, 180, 360, 1440]);
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+const ALL_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6];
 
 function encryptionKey(): Buffer {
 	const secret = process.env.MODEL_SETTINGS_SECRET;
@@ -42,6 +48,9 @@ export function validateModelSettings(input: ModelSettingsInput): ModelSettingsI
 		typeof input.model !== "string" ||
 		typeof input.enabled !== "boolean" ||
 		typeof input.intervalMinutes !== "number" ||
+		typeof input.windowStartMinute !== "number" ||
+		typeof input.windowEndMinute !== "number" ||
+		!Array.isArray(input.weekdays) ||
 		(input.apiKey !== undefined && typeof input.apiKey !== "string")
 	) {
 		throw new Error("invalid model settings fields");
@@ -65,7 +74,39 @@ export function validateModelSettings(input: ModelSettingsInput): ModelSettingsI
 	if (!Number.isInteger(input.intervalMinutes) || input.intervalMinutes < MIN_INTERVAL_MINUTES || input.intervalMinutes > MAX_INTERVAL_MINUTES || !INTERVAL_OPTIONS.has(input.intervalMinutes)) {
 		throw new Error("intervalMinutes must be one of 5, 15, 30, 60, 180, 360, or 1440");
 	}
-	return { ...input, baseUrl, model };
+	// Minutes after local midnight; windowEnd is inclusive, so 0–1439 covers the full day.
+	if (!Number.isInteger(input.windowStartMinute) || input.windowStartMinute < 0 || input.windowStartMinute > 1439) {
+		throw new Error("windowStartMinute must be an integer within 0-1439");
+	}
+	if (!Number.isInteger(input.windowEndMinute) || input.windowEndMinute <= input.windowStartMinute || input.windowEndMinute > 1439) {
+		throw new Error("windowEndMinute must be an integer within 1-1439 and after windowStartMinute");
+	}
+	if (input.weekdays.length === 0 || new Set(input.weekdays).size !== input.weekdays.length) {
+		throw new Error("weekdays must be a non-empty list of unique days");
+	}
+	if (input.weekdays.some((day) => !Number.isInteger(day) || day < 0 || day > 6)) {
+		throw new Error("weekdays entries must be integers within 0-6");
+	}
+	return { ...input, baseUrl, model, weekdays: [...input.weekdays].sort((a, b) => a - b) };
+}
+
+/** DB stores weekdays as a bit mask: bit d = weekday d (0 = Sunday). */
+function weekdaysToMask(days: number[]): number {
+	return days.reduce((mask, day) => mask | (1 << day), 0);
+}
+
+export function toInspectionSchedule(row: {
+	inspectionIntervalMinutes: number;
+	inspectionWindowStart: number;
+	inspectionWindowEnd: number;
+	inspectionWeekdays: number;
+}): InspectionSchedule {
+	return {
+		intervalMinutes: row.inspectionIntervalMinutes,
+		windowStartMinute: row.inspectionWindowStart,
+		windowEndMinute: row.inspectionWindowEnd,
+		weekdays: ALL_WEEKDAYS.filter((day) => row.inspectionWeekdays & (1 << day)),
+	};
 }
 
 export async function readModelSettings() {
@@ -75,20 +116,28 @@ export async function readModelSettings() {
 
 export type InspectionSchedulePlan =
 	| { type: "none" }
-	/** Enable transition: idle states become due at the next sweep. */
-	| { type: "schedule-idle-now" }
-	/** Interval change while enabled: pull idle states earlier, never delay one. */
-	| { type: "reschedule-idle"; capAt: Date }
+	/** Enable transition or schedule change: idle states restart from the new schedule. */
+	| { type: "reschedule-idle"; nextAt: Date }
 	/** Disable transition: idle states stop; live locks are untouched. */
 	| { type: "clear-schedule" };
+
+function sameSchedule(a: InspectionSchedule, b: InspectionSchedule): boolean {
+	return a.intervalMinutes === b.intervalMinutes
+		&& a.windowStartMinute === b.windowStartMinute
+		&& a.windowEndMinute === b.windowEndMinute
+		&& new Set(a.weekdays).size === new Set(b.weekdays).size
+		&& a.weekdays.every((day) => b.weekdays.includes(day));
+}
 
 /**
  * Decides how project_analysis_states schedules should react to a settings
  * save. Rules:
  * - Only the disabled→enabled transition schedules projects (idle states run
- *   at the next sweep); plain re-saves while enabled never reset schedules.
- * - Interval changes reschedule idle states to min(existing, now+interval),
- *   so an already-due inspection is never pushed further out.
+ *   at the schedule's next slot); plain re-saves while enabled never reset
+ *   schedules.
+ * - Any schedule change while enabled recomputes idle states from the new
+ *   schedule (the old nextInspectionAt belongs to a schedule that no longer
+ *   exists, so it is neither capped nor preserved).
  * - Disabling clears schedules for idle states only — a live lock
  *   (lockedAt) is never cleared, so an in-flight inspection cannot cause
  *   concurrent re-entry into the same project.
@@ -96,14 +145,13 @@ export type InspectionSchedulePlan =
  *   reschedules on completion or failure.
  */
 export function planInspectionSchedule(
-	previous: { enabled: boolean; intervalMinutes: number } | undefined,
-	next: { enabled: boolean; intervalMinutes: number },
+	previous: { enabled: boolean; schedule: InspectionSchedule } | undefined,
+	next: { enabled: boolean; schedule: InspectionSchedule },
 	now: Date,
 ): InspectionSchedulePlan {
 	if (!next.enabled) return previous?.enabled ? { type: "clear-schedule" } : { type: "none" };
-	if (!previous?.enabled) return { type: "schedule-idle-now" };
-	if (next.intervalMinutes !== previous.intervalMinutes) {
-		return { type: "reschedule-idle", capAt: new Date(now.getTime() + next.intervalMinutes * 60_000) };
+	if (!previous?.enabled || !sameSchedule(previous.schedule, next.schedule)) {
+		return { type: "reschedule-idle", nextAt: computeNextInspectionAt(next.schedule, now) };
 	}
 	return { type: "none" };
 }
@@ -113,16 +161,11 @@ async function applyInspectionSchedulePlan(
 	plan: InspectionSchedulePlan,
 	now: Date,
 ): Promise<void> {
-	if (plan.type === "schedule-idle-now") {
-		await tx.update(projectAnalysisStates).set({ nextInspectionAt: now, updatedAt: now }).where(isNull(projectAnalysisStates.lockedAt));
+	if (plan.type === "reschedule-idle") {
+		await tx.update(projectAnalysisStates).set({ nextInspectionAt: plan.nextAt, updatedAt: now }).where(isNull(projectAnalysisStates.lockedAt));
 	} else if (plan.type === "clear-schedule") {
 		// lockedAt is deliberately not touched: a live inspection keeps its claim.
 		await tx.update(projectAnalysisStates).set({ nextInspectionAt: null, updatedAt: now }).where(isNull(projectAnalysisStates.lockedAt));
-	} else if (plan.type === "reschedule-idle") {
-		await tx.update(projectAnalysisStates).set({
-			nextInspectionAt: sql`least(coalesce(${projectAnalysisStates.nextInspectionAt}, 'infinity'::timestamptz), ${plan.capAt})`,
-			updatedAt: now,
-		}).where(isNull(projectAnalysisStates.lockedAt));
 	}
 }
 
@@ -136,8 +179,16 @@ export async function saveModelSettings(input: ModelSettingsInput): Promise<Mode
 		if (valid.apiKey !== undefined) apiKeyCipher = valid.apiKey.trim() ? encryptApiKey(valid.apiKey.trim()) : null;
 		if (valid.enabled && !apiKeyCipher) throw new Error("an API key is required when inspection is enabled");
 		const schedulePlan = planInspectionSchedule(
-			existing ? { enabled: existing.enabled, intervalMinutes: existing.inspectionIntervalMinutes } : undefined,
-			{ enabled: valid.enabled, intervalMinutes: valid.intervalMinutes },
+			existing ? { enabled: existing.enabled, schedule: toInspectionSchedule(existing) } : undefined,
+			{
+				enabled: valid.enabled,
+				schedule: {
+					intervalMinutes: valid.intervalMinutes,
+					windowStartMinute: valid.windowStartMinute,
+					windowEndMinute: valid.windowEndMinute,
+					weekdays: valid.weekdays,
+				},
+			},
 			now,
 		);
 		const [row] = await tx
@@ -148,6 +199,9 @@ export async function saveModelSettings(input: ModelSettingsInput): Promise<Mode
 				apiKeyCipher,
 				enabled: valid.enabled,
 				inspectionIntervalMinutes: valid.intervalMinutes,
+				inspectionWindowStart: valid.windowStartMinute,
+				inspectionWindowEnd: valid.windowEndMinute,
+				inspectionWeekdays: weekdaysToMask(valid.weekdays),
 				updatedAt: now,
 			})
 			.where(eq(modelSettings.id, SETTINGS_ID))
@@ -165,6 +219,9 @@ export function toModelSettingsDto(row: typeof modelSettings.$inferSelect | unde
 		model: row?.model ?? "gpt-4o-mini",
 		enabled: row?.enabled ?? false,
 		intervalMinutes: row?.inspectionIntervalMinutes ?? 60,
+		windowStartMinute: row?.inspectionWindowStart ?? 0,
+		windowEndMinute: row?.inspectionWindowEnd ?? 1439,
+		weekdays: row ? toInspectionSchedule(row).weekdays : [...ALL_WEEKDAYS],
 		hasApiKey: Boolean(row?.apiKeyCipher),
 		updatedAt: row?.updatedAt.getTime(),
 	};

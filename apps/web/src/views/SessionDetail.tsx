@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import type { MessageDTO, SessionDetailDTO, ToolCallDTO, TurnDTO } from "@pi-kanban/shared";
 import { cacheHitRate, fmtCost, fmtElapsed, fmtTime, useResource } from "../api.js";
 import { useI18n } from "../i18n.js";
@@ -9,6 +9,7 @@ import { StateIcon } from "../components/icons.js";
 export function SessionDetail() {
 	const { id } = useParams<{ id: string }>();
 	const { t } = useI18n();
+	const navigate = useNavigate();
 	const { data, error, loading } = useResource<SessionDetailDTO>(
 		id ? `/api/sessions/${id}` : null,
 	);
@@ -22,9 +23,18 @@ export function SessionDetail() {
 		<div className="session-detail">
 			<div className="detail-main">
 				<header className="detail-head">
-					<Link to="/" className="back">
-						← {t("nav.board")}
-					</Link>
+					<button
+						type="button"
+						className="back"
+						onClick={() => {
+							// history.state.idx comes from react-router's history: > 0 means an in-app entry exists to go back to.
+							const idx = (window.history.state as { idx?: number } | null)?.idx;
+							if (idx != null && idx > 0) navigate(-1);
+							else navigate("/");
+						}}
+					>
+						← {t("nav.back")}
+					</button>
 					<div className="project">
 						{s.projectName}
 						{s.branch && <span className="branch">{s.branch}</span>}
