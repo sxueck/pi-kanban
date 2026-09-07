@@ -19,11 +19,6 @@ const DEFAULT_RULES = [
 	{ tool: "bash", match: "\\bgit\\s+clean\\b[^\\n]*(-f|--force)", flags: "i", label: "git clean -f" },
 	{ tool: "bash", match: "\\bsudo\\b", flags: "i", label: "sudo" },
 	{ tool: "bash", match: "curl[^|;]*\\|\\s*(ba)?sh", flags: "i", label: "curl | sh" },
-	// Interactive tools park the session until a human answers; gate them
-	// through the same cloud approval so nothing wedges invisibly. Both known
-	// ask-user tool names are listed (name varies across pi versions).
-	{ tool: "ask_user", label: "ask user", interactive: true },
-	{ tool: "ask_user_question", label: "ask user", interactive: true },
 ];
 
 function defaultConfig(): PluginConfig {

@@ -135,7 +135,7 @@ export class Transport {
 			});
 			if (!res.ok) console.error(`[pi-kanban] http heartbeat failed: HTTP ${res.status}`);
 		} catch {
-			// Server unreachable — the sweep marks sessions offline; reconnect keeps trying.
+			console.error("[pi-kanban] heartbeat transport unavailable");
 		}
 	}
 
@@ -225,7 +225,7 @@ export class Transport {
 		try {
 			this.ws?.send(raw);
 		} catch {
-			// socket died mid-send; onclose will reschedule
+			console.error("[pi-kanban] socket send failed");
 		}
 	}
 }

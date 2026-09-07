@@ -197,7 +197,8 @@ async function attachSizes(root: string, files: ProjectSnapshotFile[]): Promise<
 						file.size = stats.size;
 					}
 				} catch {
-					// The file can vanish between listing and stat; size is optional.
+					// Files can disappear between listing and stat; sizes are optional.
+					return undefined;
 				}
 				return undefined;
 			}),
