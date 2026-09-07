@@ -13,7 +13,6 @@ const SETTINGS_ID = 1;
 const MIN_INTERVAL_MINUTES = 5;
 const MAX_INTERVAL_MINUTES = 24 * 60;
 const INTERVAL_OPTIONS = new Set([5, 15, 30, 60, 180, 360, 1440]);
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const ALL_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6];
 
 function encryptionKey(): Buffer {
@@ -65,9 +64,6 @@ export function validateModelSettings(input: ModelSettingsInput): ModelSettingsI
 		throw new Error("baseUrl must be a valid HTTP(S) URL");
 	}
 	if (url.username || url.password) throw new Error("baseUrl must not contain credentials");
-	if (url.protocol === "http:" && !LOOPBACK_HOSTS.has(url.hostname)) {
-		throw new Error("remote model connections must use HTTPS");
-	}
 	const baseUrl = url.toString().replace(/\/$/, "");
 	const model = input.model.trim();
 	if (!model || model.length > 200) throw new Error("model must contain 1-200 characters");

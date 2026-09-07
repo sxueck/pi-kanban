@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { InspectionLogDetailDTO, InspectionLogSummaryDTO, InspectionStageEvent } from "@pi-kanban/shared";
-import { API_BASE, fmtTime, getToken, useResource } from "../api.js";
+import { API_BASE, apiErrorMessage, fmtTime, getToken, useResource } from "../api.js";
 import { useI18n } from "../i18n.js";
 import type { MsgKey } from "../i18n.js";
 
@@ -45,7 +45,7 @@ export function InspectionLogPanel({ projectId, onClose }: { projectId: number; 
 		});
 	};
 	const { data: logs } = useResource<InspectionLogSummaryDTO[]>(`/api/projects/${projectId}/inspection-logs`, refreshKey);
-	const { data: detail } = useResource<InspectionLogDetailDTO>(
+	const { data: detail, error: detailError } = useResource<InspectionLogDetailDTO>(
 		selected ? `/api/projects/${projectId}/inspection-logs/${selected}` : null,
 		refreshKey,
 	);
@@ -147,7 +147,7 @@ export function InspectionLogPanel({ projectId, onClose }: { projectId: number; 
 					<main className="log-detail">
 						<LiveStreamBlocks liveText={liveText} />
 						{detail == null ? (
-							<p className="muted">{selected ? t("common.loading") : t("logs.select")}</p>
+							<p className="muted">{detailError ? apiErrorMessage(detailError) : selected ? t("common.loading") : t("logs.select")}</p>
 						) : (
 							<>
 								<div className="card-meta">
@@ -156,9 +156,9 @@ export function InspectionLogPanel({ projectId, onClose }: { projectId: number; 
 									{detail.inspection.error && <span className="error-flag">{detail.inspection.error}</span>}
 								</div>
 								<LogSection title={t("logs.system")} text={detail.systemPrompt} />
-								<LogSection title={t("logs.payload")} text={pretty(detail.requestPayload)} />
+								{detail.requestPayload != null && <LogSection title={t("logs.payload")} text={pretty(detail.requestPayload)} />}
 								{detail.reasoningContent != null && <LogSection title={t("logs.reasoning")} text={detail.reasoningContent} />}
-								<LogSection title={t("logs.response")} text={prettyText(detail.responseContent)} />
+								{detail.responseContent != null && <LogSection title={t("logs.response")} text={prettyText(detail.responseContent)} />}
 							</>
 						)}
 					</main>

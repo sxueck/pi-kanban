@@ -46,13 +46,13 @@ export function buildStructureTree(
 			parentId: parentPath ? `path:${parentPath}` : "project",
 			kind: "module",
 			label: slash < 0 ? dir : dir.slice(slash + 1),
-			detail: `${count} file${count === 1 ? "" : "s"}`,
+			fileCount: count,
 		});
 	}
 
 	for (const file of rootFiles.sort((left, right) => left.localeCompare(right))) {
 		if (nodes.length >= MAX_STRUCTURE_NODES) break;
-		nodes.push({ id: `file:${file}`, parentId: "project", kind: "module", label: file });
+		nodes.push({ id: `file:${file}`, parentId: "project", kind: "file", label: file });
 	}
 	return nodes;
 }

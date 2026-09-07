@@ -358,7 +358,7 @@ export interface ProjectMemoryDTO {
 	createdAt: number;
 }
 
-export type ProjectTreeNodeKind = "project" | "module" | "decision" | "milestone" | "issue" | "evidence";
+export type ProjectTreeNodeKind = "project" | "module" | "file" | "decision" | "milestone" | "issue" | "evidence";
 
 export interface ProjectTreeNodeDTO {
 	id: string;
@@ -366,6 +366,8 @@ export interface ProjectTreeNodeDTO {
 	kind: ProjectTreeNodeKind;
 	label: string;
 	detail?: string;
+	/** File count under a structural directory node; localized by the client. */
+	fileCount?: number;
 	severity?: "info" | "warning" | "error";
 	sessionId?: string;
 	turnPosition?: number;

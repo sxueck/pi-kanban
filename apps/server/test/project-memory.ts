@@ -65,7 +65,8 @@ try {
 	});
 	const validSchedule = { windowStartMinute: 0, windowEndMinute: 1439, weekdays: [0, 1, 2, 3, 4, 5, 6] as number[] };
 	assert.throws(() => validateModelSettings({ baseUrl: "file:///tmp/model", model: "x", enabled: false, intervalMinutes: 15, ...validSchedule }));
-	assert.throws(() => validateModelSettings({ baseUrl: "http://model.example.test/v1", model: "x", enabled: false, intervalMinutes: 15, ...validSchedule }));
+	// http with any host is allowed (e.g. service names on a private network)
+	assert.equal(validateModelSettings({ baseUrl: "http://model.example.test/v1", model: "x", enabled: false, intervalMinutes: 15, ...validSchedule }).baseUrl, "http://model.example.test/v1");
 	assert.throws(() => validateModelSettings({ baseUrl: "https://user:pass@example.test/v1", model: "x", enabled: false, intervalMinutes: 15, ...validSchedule }));
 	assert.throws(() => validateModelSettings({ baseUrl: "https://example.test", model: "x", enabled: false, intervalMinutes: 1, ...validSchedule }));
 	assert.throws(() => validateModelSettings({ baseUrl: "https://example.test", model: "x", enabled: false, intervalMinutes: 45, ...validSchedule }));
@@ -166,6 +167,8 @@ try {
 	assert.equal(tree[0]?.id, "project");
 	assert.ok(tree.some((node) => node.id === "path:apps/web/src" && node.parentId === "path:apps/web"));
 	assert.ok(tree.some((node) => node.id === "file:README.md" && node.parentId === "project"));
+	assert.equal(tree.find((node) => node.id === "file:README.md")?.kind, "file", "root files are file nodes, not modules");
+	assert.equal(tree.find((node) => node.id === "path:apps/web")?.fileCount, 2, "directory nodes carry a structured file count (client localizes the label)");
 	const coverage = addProjectReadCoverage(tree, [
 		{ path: "apps/web/src/main.tsx" },
 		{ path: "apps/web/src/App.tsx" },
