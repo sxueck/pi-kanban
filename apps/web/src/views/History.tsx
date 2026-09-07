@@ -179,12 +179,12 @@ export function ProjectSessions() {
 									{sessions.map((s) => (
 										<tr key={s.id}>
 											<td>
-												<Link to={`/sessions/${s.id}`} title={s.title ?? s.id}>{s.title ?? s.id}</Link>
+												<Link to={`/sessions/${s.id}`} title={s.title ?? s.id}>{s.title ?? t("board.untitled")}</Link>
 											</td>
-											<td className={`status-${s.state}`}>{t(`state.${s.state}` as MsgKey)}</td>
-											<td>{s.turnCount}</td>
-											<td>{fmtCost(s.totalCostUsd)}</td>
-											<td>{fmtTime(s.startedAt)}</td>
+											<td className={`status-${s.state} nowrap`}>{t(`state.${s.state}` as MsgKey)}</td>
+											<td className="nowrap">{s.turnCount}</td>
+											<td className="nowrap">{fmtCost(s.totalCostUsd)}</td>
+											<td className="nowrap">{fmtTime(s.startedAt)}</td>
 										</tr>
 									))}
 								</tbody>
@@ -586,6 +586,7 @@ function TreeLevel({ byParent, parentId, depth = 0, selectedNodeId, onSelect }: 
 								)}
 							</summary>
 							{node.coverage && node.coverage.totalFiles > 0 && <span className="work-coverage">{t("work.coverage.files", { read: node.coverage.readFiles, total: node.coverage.totalFiles })}</span>}
+							{node.fileCount != null && <p className="work-detail">{t("work.tree.files", { n: node.fileCount })}</p>}
 							{node.detail && <p className="work-detail">{node.detail}</p>}
 							<TreeLevel byParent={byParent} parentId={node.id} depth={depth + 1} selectedNodeId={selectedNodeId} onSelect={onSelect} />
 						</details>

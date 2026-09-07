@@ -620,15 +620,13 @@ api.post("/api/projects/:id/inspect", async (c) => {
 	}
 });
 
-api.get("/api/projects/:id/inspection-logs", async (c) => {
-	const projectId = Number(c.req.param("id"));
-	if (!Number.isInteger(projectId)) return c.json({ error: "bad project id" }, 400);
-	const userId = currentUser(c).id;
-	const [owned] = await db.select({ id: projects.id }).from(projects)
-		.innerJoin(sessions, and(eq(sessions.projectId, projects.id), eq(sessions.userId, userId)))
-		.where(eq(projects.id, projectId)).limit(1);
-	if (!owned) return c.json({ error: "project not found" }, 404);
-	const rows = await db.select({
+/**
+ * Runs listed from project_inspections (left-joined to its transcript):
+ * a run that fails before any payload is assembled has no transcript row,
+ * and an inner join would silently drop it from the history.
+ */
+export function inspectionLogListQuery(userId: string, projectId: number) {
+	return db.select({
 		inspectionId: projectInspections.id,
 		trigger: projectInspections.trigger,
 		status: projectInspections.status,
@@ -640,11 +638,22 @@ api.get("/api/projects/:id/inspection-logs", async (c) => {
 		// are fetched by the detail endpoint on demand.
 		hasResponse: sql<boolean>`(${projectInspectionLogs.responseContent} is not null)`,
 		hasReasoning: sql<boolean>`(${projectInspectionLogs.reasoningContent} is not null)`,
-	}).from(projectInspectionLogs)
-		.innerJoin(projectInspections, eq(projectInspections.id, projectInspectionLogs.inspectionId))
+	}).from(projectInspections)
+		.leftJoin(projectInspectionLogs, eq(projectInspectionLogs.inspectionId, projectInspections.id))
 		.where(and(eq(projectInspections.userId, userId), eq(projectInspections.projectId, projectId)))
 		.orderBy(desc(projectInspections.startedAt))
 		.limit(RETAINED_INSPECTION_LOGS);
+}
+
+api.get("/api/projects/:id/inspection-logs", async (c) => {
+	const projectId = Number(c.req.param("id"));
+	if (!Number.isInteger(projectId)) return c.json({ error: "bad project id" }, 400);
+	const userId = currentUser(c).id;
+	const [owned] = await db.select({ id: projects.id }).from(projects)
+		.innerJoin(sessions, and(eq(sessions.projectId, projects.id), eq(sessions.userId, userId)))
+		.where(eq(projects.id, projectId)).limit(1);
+	if (!owned) return c.json({ error: "project not found" }, 404);
+	const rows = await inspectionLogListQuery(userId, projectId);
 	const logs: InspectionLogSummaryDTO[] = rows.map((row) => ({
 		inspectionId: row.inspectionId,
 		trigger: row.trigger as "manual" | "schedule",
@@ -677,12 +686,12 @@ api.get("/api/projects/:id/inspection-logs/:inspectionId", async (c) => {
 		requestPayload: projectInspectionLogs.requestPayload,
 		responseContent: projectInspectionLogs.responseContent,
 		reasoningContent: projectInspectionLogs.reasoningContent,
-	}).from(projectInspectionLogs)
-		.innerJoin(projectInspections, eq(projectInspections.id, projectInspectionLogs.inspectionId))
+	}).from(projectInspections)
+		.leftJoin(projectInspectionLogs, eq(projectInspectionLogs.inspectionId, projectInspections.id))
 		.where(and(
 			eq(projectInspections.userId, userId),
 			eq(projectInspections.projectId, projectId),
-			eq(projectInspectionLogs.inspectionId, inspectionId),
+			eq(projectInspections.id, inspectionId),
 		)).limit(1);
 	if (!row) return c.json({ error: "log not found" }, 404);
 	const detail: InspectionLogDetailDTO = {

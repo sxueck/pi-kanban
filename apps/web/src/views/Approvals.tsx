@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { ApprovalDTO } from "@pi-kanban/shared";
 import { apiPost, fmtTime, useResource } from "../api.js";
 import { useI18n } from "../i18n.js";
+import type { MsgKey } from "../i18n.js";
 import { NoApprovalsIllustration } from "../components/illustrations.js";
 
 export function Approvals() {
@@ -78,7 +79,7 @@ export function Approvals() {
 								<td>{a.decidedAt ? fmtTime(a.decidedAt) : "—"}</td>
 								<td>{a.policyLabel}</td>
 								<td className="mono">{a.toolName}</td>
-								<td className={`status-${a.status}`}>{a.status}</td>
+								<td className={`status-${a.status}`}>{t(`approvals.status.${a.status}` as MsgKey)}</td>
 								<td>{a.decidedBy ?? (a.status === "local_resolved" ? t("approvals.localTui") : "—")}</td>
 							</tr>
 						))}

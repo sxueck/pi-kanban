@@ -398,7 +398,7 @@ function RecentSessionCard({ session }: { session: RecentSessionDTO }) {
 			<span className={`recent-state state-${session.state}`}>{t(`state.${session.state}` as MsgKey)}</span>
 			<strong>{session.title ?? t("board.untitled")}</strong>
 			<span className="recent-project">{session.projectName}</span>
-			<span className="recent-meta">{t("board.turns", { n: session.turnCount })} · {fmtElapsed(session.lastActivityAt)}</span>
+			<span className="recent-meta">{t("board.turns", { n: session.turnCount })} · {t("detail.active", { elapsed: fmtElapsed(session.lastActivityAt) })}</span>
 		</Link>
 	);
 }

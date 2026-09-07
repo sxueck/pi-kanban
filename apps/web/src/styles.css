@@ -1061,6 +1061,10 @@ button.deny:hover {
 	vertical-align: top;
 }
 
+.table td.nowrap {
+	white-space: nowrap;
+}
+
 .table tbody tr {
 	transition: background 20ms ease-in;
 }

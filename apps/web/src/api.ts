@@ -99,16 +99,43 @@ interface EventSourceLike {
 
 type IntervalHandle = ReturnType<typeof setInterval>;
 
+/** Minimum spacing between subscriber notifications for one SSE burst. */
+const UPDATE_NOTIFY_INTERVAL_MS = 1_000;
+
 export function createResourceUpdateChannel(
 	openEventSource: () => EventSourceLike,
 	startPolling: (listener: RefreshListener) => IntervalHandle = (listener) => setInterval(listener, 15_000),
 	stopPolling: (handle: IntervalHandle) => void = clearInterval,
+	notifyIntervalMs = UPDATE_NOTIFY_INTERVAL_MS,
 ): { subscribe(listener: RefreshListener): () => void } {
 	const listeners = new Set<RefreshListener>();
 	let source: EventSourceLike | undefined;
 	let polling: IntervalHandle | undefined;
-	const refresh = () => {
+	let trailing: ReturnType<typeof setTimeout> | undefined;
+	let lastNotify = 0;
+	const notify = () => {
 		for (const listener of listeners) listener();
+	};
+	// An agent turn emits many `update` events back to back; notifying on each
+	// would refetch every mounted resource dozens of times per second. Notify
+	// immediately, then at most once per window, with one trailing catch-up so
+	// the final state after a burst is never dropped.
+	const onSseUpdate = () => {
+		const now = Date.now();
+		if (now - lastNotify >= notifyIntervalMs) {
+			lastNotify = now;
+			if (trailing !== undefined) clearTimeout(trailing);
+			trailing = undefined;
+			notify();
+			return;
+		}
+		if (trailing === undefined) {
+			trailing = setTimeout(() => {
+				trailing = undefined;
+				lastNotify = Date.now();
+				notify();
+			}, notifyIntervalMs - (now - lastNotify));
+		}
 	};
 
 	return {
@@ -117,11 +144,16 @@ export function createResourceUpdateChannel(
 			listeners.add(subscription);
 			if (listeners.size === 1) {
 				source = openEventSource();
-				source.addEventListener("update", refresh as EventListener);
-				polling = startPolling(refresh);
+				source.addEventListener("update", onSseUpdate);
+				// The polling fallback must never be swallowed by the burst throttle.
+				polling = startPolling(notify);
 			}
 			return () => {
 				if (!listeners.delete(subscription) || listeners.size !== 0) return;
+				if (trailing !== undefined) {
+					clearTimeout(trailing);
+					trailing = undefined;
+				}
 				source?.close();
 				source = undefined;
 				if (polling !== undefined) stopPolling(polling);
@@ -134,6 +166,89 @@ export function createResourceUpdateChannel(
 const resourceUpdates = createResourceUpdateChannel(
 	() => new EventSource(`${API_BASE}/api/events?token=${encodeURIComponent(getToken())}`),
 );
+
+export interface ResourceLoader {
+	request(path: string): void;
+	dispose(): void;
+}
+
+/**
+ * Serial fetch coordinator behind useResource.
+ *
+ * A refresh for the same path never cancels the in-flight request — refreshes
+ * requested mid-flight coalesce into one catch-up that runs after the current
+ * fetch settles — so update storms cannot starve data from landing. Only a
+ * path change or dispose discards a late result. `loading` is raised solely
+ * for a load that has no data to show yet; refreshes keep stale data visible.
+ */
+export function createResourceLoader<T>(
+	load: (path: string) => Promise<T>,
+	notify: { data: (value: T | null) => void; error: (err: Error | null) => void; loading: (busy: boolean) => void },
+): ResourceLoader {
+	let generation = 0;
+	let path: string | null = null;
+	let hasData = false;
+	let inFlight = false;
+	let pending = false;
+	let disposed = false;
+
+	const start = () => {
+		if (!path) return;
+		const mine = generation;
+		inFlight = true;
+		if (!hasData) notify.loading(true);
+		load(path)
+			.then((value) => {
+				if (mine !== generation || disposed) return;
+				hasData = true;
+				notify.data(value);
+				notify.error(null);
+			})
+			.catch((err: unknown) => {
+				if (mine !== generation || disposed) return;
+				notify.error(err instanceof Error ? err : new Error(String(err)));
+			})
+			.finally(() => {
+				if (mine !== generation || disposed) return;
+				inFlight = false;
+				notify.loading(false);
+				if (pending) {
+					pending = false;
+					start();
+				}
+			});
+	};
+
+	return {
+		request(next) {
+			if (disposed) return;
+			if (next === path) {
+				if (inFlight) {
+					pending = true;
+					return;
+				}
+				start();
+				return;
+			}
+			const hadPath = path !== null;
+			generation++;
+			path = next;
+			inFlight = false;
+			pending = false;
+			hasData = false;
+			if (hadPath) {
+				notify.data(null);
+				notify.error(null);
+			}
+			start();
+		},
+		dispose() {
+			disposed = true;
+			generation++;
+			pending = false;
+		},
+	};
+}
 
 /**
  * Fetch a resource, refresh it on shared SSE updates and a slow polling fallback.
@@ -148,37 +263,22 @@ export function useResource<T>(path: string | null, refreshKey = 0): {
 	const [error, setError] = useState<Error | null>(null);
 	const [loading, setLoading] = useState(true);
 	const [version, setVersion] = useState(0);
-	const alive = useRef(true);
+	const loaderRef = useRef<ResourceLoader | null>(null);
+	if (loaderRef.current === null) {
+		loaderRef.current = createResourceLoader<T>(apiGet, {
+			data: setData,
+			error: setError,
+			loading: setLoading,
+		});
+	}
 
 	const refetch = useCallback(() => setVersion((v) => v + 1), []);
 
-	useEffect(() => {
-		alive.current = true;
-		return () => {
-			alive.current = false;
-		};
-	}, []);
+	useEffect(() => () => loaderRef.current?.dispose(), []);
 
 	useEffect(() => {
 		if (!path) return;
-		let cancelled = false;
-		setLoading(true);
-		apiGet<T>(path)
-			.then((result) => {
-				if (!cancelled && alive.current) {
-					setData(result);
-					setError(null);
-				}
-			})
-			.catch((err: unknown) => {
-				if (!cancelled && alive.current) setError(err as Error);
-			})
-			.finally(() => {
-				if (!cancelled) setLoading(false);
-			});
-		return () => {
-			cancelled = true;
-		};
+		loaderRef.current?.request(path);
 	}, [path, version, refreshKey]);
 
 	// One app-wide stream refreshes all mounted resources without consuming one

@@ -43,7 +43,7 @@ export function SessionDetail() {
 					<h2>{s.title ?? s.id}</h2>
 					<div className="card-meta">
 						<span>{t("detail.started", { time: fmtTime(s.startedAt) })}</span>
-						<span>{t("detail.active", { elapsed: fmtElapsed(s.startedAt, s.lastActivityAt) })}</span>
+						<span>{t("detail.active", { elapsed: fmtElapsed(s.lastActivityAt) })}</span>
 						<span>{t("detail.turns", { n: s.turns.length })}</span>
 						<span>{fmtCost(s.totalCostUsd)}</span>
 						{s.modelId && <span className="mono">{s.modelId}</span>}
@@ -90,7 +90,7 @@ export function SessionDetail() {
 									<td>{fmtTime(a.requestedAt)}</td>
 									<td>{a.policyLabel}</td>
 									<td className="mono">{a.toolName}</td>
-									<td className={`status-${a.status}`}>{a.status}</td>
+									<td className={`status-${a.status}`}>{t(`approvals.status.${a.status}` as MsgKey)}</td>
 									<td>{a.decidedBy ?? (a.status === "local_resolved" ? t("approvals.localTui") : "—")}</td>
 								</tr>
 							))}
