@@ -237,7 +237,7 @@ const tests: Array<[string, () => Promise<void>]> = [
 		},
 	],
 	[
-		"interactive rule (ask_user): no local confirm, straight to cloud; approval lets it run",
+		"interactive rule (ask_user): local confirm answers so the session unsticks",
 		async () => {
 			const transport = new FakeTransport();
 			transport.connected = true;
@@ -252,12 +252,11 @@ const tests: Array<[string, () => Promise<void>]> = [
 				{ toolName: "ask_user", toolCallId: "tc-a", input: { questions: [] } },
 				ctx,
 			);
-			await new Promise((resolve) => setTimeout(resolve, 10));
-			assert.equal(confirmCalls(), 0, "interactive rules must not double-prompt locally");
+			await pending;
+			assert.equal(confirmCalls(), 1, "interactive rules prompt locally too");
 			assert.equal(transport.requests.length, 1);
 			assert.equal(transport.requests[0].toolName, "ask_user");
-			transport.decisionSink!("approved");
-			assert.equal(await pending, undefined);
+			assert.equal(transport.requests[0].localPrompted, true);
 		},
 	],
 	[

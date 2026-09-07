@@ -31,14 +31,11 @@ export function matchRule(
 		try {
 			if (new RegExp(rule.match, rule.flags ?? "i").test(serialized)) return rule;
 		} catch {
-		// Ignore malformed user config.
+			// An invalid approval regex must not silently remove its gate.
+			return rule;
 		}
 	}
 	return null;
-}
-
-function sleep(ms: number): Promise<"timeout"> {
-	return new Promise((resolve) => setTimeout(() => resolve("timeout"), ms));
 }
 
 export type GateVerdict = "approved" | "denied" | "timeout" | "offline";
@@ -60,19 +57,6 @@ export interface GateDeps {
 	getTurnPosition(): number | undefined;
 }
 
-/**
- * Local-first, cloud-fallback permission gate:
- * 1. TUI present -> ask locally first (ctx.ui.confirm), bounded by localTimeoutSec.
- * 2. Headless, or local prompt unanswered -> escalate to the cloud kanban
- *    (bounded by cloudTimeoutSec).
- * 3. Neither answers -> onTimeout policy ("deny" default).
- * Local answers always reach the cloud as an audit trail.
- *
- * Offline rule: whenever the server is unreachable (before the call or the
- * connection drops mid-flight), the plugin stands down entirely — no prompt,
- * no cloud request, no block — as if it were not installed. Only a
- * connected-but-silent server can fall through to onTimeout.
- */
 export async function runGate(
 	deps: GateDeps,
 	event: ToolCallEvent,
@@ -93,59 +77,73 @@ export async function runGate(
 		createdAt: Date.now(),
 	};
 
+	// Cancels the local confirm dialog once the gate resolves by any path
+	// (local answer, cloud decision, timeout) and when the turn aborts.
+	const dialogAbort = new AbortController();
+	const onCtxAbort = () => dialogAbort.abort();
+	if (ctx.signal) {
+		if (ctx.signal.aborted) dialogAbort.abort();
+		else ctx.signal.addEventListener("abort", onCtxAbort, { once: true });
+	}
 	const cloudWait = (): Promise<GateVerdict> =>
-		waitForCloud(deps, { ...base, localPrompted: ctx.hasUI });
+		waitForCloud(deps, { ...base, localPrompted: ctx.hasUI }, dialogAbort.signal);
 
 	let localPrompt: Promise<boolean> | null = null;
-	if (!rule.interactive && ctx.hasUI && deps.gate.localTimeoutSec > 0) {
-		localPrompt = ctx.ui.confirm(
-			"pi-kanban approval",
-			`Allow ${rule.label}?\n\n${summarizeInput(event)}`,
-		);
-		const local = await Promise.race([
-			localPrompt,
-			sleep(deps.gate.localTimeoutSec * 1000),
-		]);
-		if (local !== "timeout") {
-			void auditLocalResolution(deps, { ...base, localPrompted: true }, local === true);
-			return local ? undefined : { block: true, reason: `Denied locally: ${rule.label}` };
-		}
-		// Unanswered locally — keep the dialog open, escalate to cloud below;
-		// whichever side answers first wins.
-	}
-
-	if (!ctx.hasUI && !deps.gate.escalateWhenHeadless) {
-		return {
-			block: true,
-			reason: `Blocked ${rule.label}: no local UI and cloud escalation disabled`,
-		};
-	}
-
-	const decision = await Promise.race(
-		localPrompt
-			? [
-					cloudWait(),
-				localPrompt.then((ok) => (ok ? ("approved" as const) : ("denied" as const))),
-			]
-			: [cloudWait()],
-	);
-
-	if (decision === "offline") return undefined;
-	if (decision === "approved") return undefined;
-	if (decision === "denied") {
-		return { block: true, reason: `Denied (${rule.label})` };
-	}
-	return deps.gate.onTimeout === "deny"
-		? {
-				block: true,
-				reason: `pi-kanban: no approval within ${deps.gate.cloudTimeoutSec}s for ${rule.label}; denied by policy`,
+	let localTimer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		if (ctx.hasUI && deps.gate.localTimeoutSec > 0) {
+			localPrompt = ctx.ui.confirm(
+				"pi-kanban approval",
+				`Allow ${rule.label}?\n\n${summarizeInput(event)}`,
+				{ signal: dialogAbort.signal },
+			);
+			const local = await Promise.race([
+				localPrompt,
+				new Promise((resolve: (v: "timeout") => void) => {
+					localTimer = setTimeout(() => resolve("timeout"), deps.gate.localTimeoutSec * 1000);
+				}),
+			]);
+			if (local !== "timeout") {
+				void auditLocalResolution(deps, { ...base, localPrompted: true }, local === true);
+				return local ? undefined : { block: true, reason: `Denied locally: ${rule.label}` };
 			}
-		: undefined;
+		}
+		if (!ctx.hasUI && !deps.gate.escalateWhenHeadless) {
+			return {
+				block: true,
+				reason: `Blocked ${rule.label}: no local UI and cloud escalation disabled`,
+			};
+		}
+		const decision = await Promise.race(
+			localPrompt
+				? [
+						cloudWait(),
+					localPrompt.then((ok) => (ok ? ("approved" as const) : ("denied" as const))),
+				]
+				: [cloudWait()],
+		);
+		if (decision === "offline") return undefined;
+		if (decision === "approved") return undefined;
+		if (decision === "denied") {
+			return { block: true, reason: `Denied (${rule.label})` };
+		}
+		return deps.gate.onTimeout === "deny"
+			? {
+					block: true,
+					reason: `pi-kanban: no approval within ${deps.gate.cloudTimeoutSec}s for ${rule.label}; denied by policy`,
+				}
+			: undefined;
+	} finally {
+		clearTimeout(localTimer);
+		ctx.signal?.removeEventListener("abort", onCtxAbort);
+		dialogAbort.abort();
+	}
 }
 
 async function waitForCloud(
 	deps: GateDeps,
 	request: Omit<ApprovalRequestMessage, "requestId">,
+	signal?: AbortSignal,
 ): Promise<GateVerdict> {
 	if (!deps.transport.connected) return "offline";
 	const approvalId = await deps.transport.requestApproval(request);
@@ -153,19 +151,18 @@ async function waitForCloud(
 	// request; only a live-but-silent server counts as a timeout.
 	if (!approvalId) return deps.transport.connected ? "timeout" : "offline";
 	return new Promise<GateVerdict>((resolve) => {
-		const finish = (verdict: DecisionVerdict) => {
+		let unlisten = () => {};
+		const onAbort = () => finish("denied");
+		const finish = (verdict: GateVerdict) => {
 			unlisten();
 			clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
 			resolve(verdict);
 		};
-		const timer = setTimeout(
-			() => {
-				unlisten();
-				resolve("timeout");
-			},
-			deps.gate.cloudTimeoutSec * 1000,
-		);
-		const unlisten = deps.transport.waitForDecision(approvalId, finish);
+		const timer = setTimeout(() => finish("timeout"), deps.gate.cloudTimeoutSec * 1000);
+		unlisten = deps.transport.waitForDecision(approvalId, finish);
+		signal?.addEventListener("abort", onAbort, { once: true });
+		if (signal?.aborted) onAbort();
 	});
 }
 

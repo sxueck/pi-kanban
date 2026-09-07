@@ -7,6 +7,8 @@ import { Transport } from "./transport.js";
 import { TurnState } from "./turn-state.js";
 import { runGate, type GateDeps } from "./gate.js";
 
+export { runGate };
+
 /**
  * pi-kanban extension: streams session lifecycle to the pi-kanban cloud
  * dashboard and gates risky tool calls with local-first / cloud-fallback
@@ -16,12 +18,9 @@ export default function (pi: ExtensionAPI): void {
 	const config = loadConfig();
 	const token = agentToken();
 	if (!token) {
-		// No token = never connectable = the plugin stays fully inert (the gate
-		// bypasses too; see gate.ts). One line so an empty dashboard is diagnosable.
 		console.error("[pi-kanban] no agent token configured — set the PI_KANBAN_TOKEN environment variable (e.g. in ~/.zshrc)");
 	}
 	const transport = new Transport(config.server.url, token);
-	transport.connect();
 
 	let sessionId: string | null = null;
 	const snapshotThrottle = new SnapshotThrottle();
@@ -40,20 +39,23 @@ export default function (pi: ExtensionAPI): void {
 		getTurnPosition: () => turns.current,
 	};
 
-	const heartbeat = setInterval(() => {
-		// transport.heartbeat: WS heartbeat + stale-socket watchdog while
-		// connected, plus the stateless HTTP heartbeat that keeps sessions on
-		// the board alive even while the WS is down/reconnecting.
-		transport.heartbeat(sessionId ? [sessionId] : []);
-	}, 30_000);
-	heartbeat.unref();
+	let heartbeat: ReturnType<typeof setInterval> | null = null;
+	const startHeartbeat = () => {
+		if (heartbeat) return;
+		heartbeat = setInterval(() => {
+			transport.heartbeat(sessionId ? [sessionId] : []);
+		}, 30_000);
+		heartbeat.unref();
+	};
 
 	// --- session lifecycle -----------------------------------------------------
 
 	pi.on("session_start", async (event, ctx) => {
 		const id = ctx.sessionManager.getSessionId();
-		if (!id) return; // ephemeral session (--no-session): nothing to track
+		if (!id) return;
 		sessionId = id;
+		transport.connect();
+		startHeartbeat();
 		messagePosition = 0;
 		turns.reset();
 		lastTodoHash = "";
@@ -86,7 +88,10 @@ export default function (pi: ExtensionAPI): void {
 				endedAt: Date.now(),
 			});
 		}
-		clearInterval(heartbeat);
+		if (heartbeat) {
+			clearInterval(heartbeat);
+			heartbeat = null;
+		}
 		transport.close();
 	});
 
@@ -253,7 +258,7 @@ export default function (pi: ExtensionAPI): void {
 				return;
 			}
 		} catch {
-			// entry shape drift across pi versions — snapshots are best-effort
+			console.error("[pi-kanban] todo snapshot unavailable");
 		}
 	}
 }
