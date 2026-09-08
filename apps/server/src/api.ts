@@ -82,6 +82,7 @@ import {
 	RETAINED_PROJECT_FINDINGS,
 	toFindingDto,
 	toMemoryDto,
+	sweepEmptyUuidSessions,
 } from "./inspector.js";
 import { getLiveInspection, subscribeInspectionLive, type InspectionLiveEvent } from "./inspection-live.js";
 import { addProjectReadCoverage, collectToolCallFiles, mergeSnapshotTree } from "./project-tree.js";
@@ -548,6 +549,7 @@ api.get("/api/history", async (c) => {
 		})
 		.from(projects)
 		.innerJoin(sessions, and(eq(sessions.projectId, projects.id), eq(sessions.userId, currentUser(c).id)))
+		.where(isNull(projects.deletedAt))
 		.groupBy(projects.id)
 		.orderBy(desc(sql`max(${sessions.lastActivityAt})`));
 	const dto: ProjectHistoryDTO[] = rows.map((row) => ({
@@ -561,6 +563,33 @@ api.get("/api/history", async (c) => {
 	return c.json(dto);
 });
 
+api.delete("/api/projects/:id", async (c) => {
+	const projectId = Number(c.req.param("id"));
+	if (!Number.isInteger(projectId)) return c.json({ error: "bad project id" }, 400);
+	const [deleted] = await db
+		.update(projects)
+		.set({ deletedAt: new Date(), updatedAt: new Date() })
+		.where(and(
+			eq(projects.id, projectId),
+			isNull(projects.deletedAt),
+			sql`exists (select 1 from ${sessions} where ${sessions.projectId} = ${projects.id} and ${sessions.userId} = ${currentUser(c).id})`,
+		))
+		.returning({ id: projects.id });
+	if (!deleted) return c.json({ error: "project not found" }, 404);
+	return c.body(null, 204);
+});
+
+api.post("/api/projects/:id/clear-empty-sessions", async (c) => {
+	const projectId = Number(c.req.param("id"));
+	if (!Number.isInteger(projectId)) return c.json({ error: "bad project id" }, 400);
+	const [owned] = await db.select({ id: projects.id }).from(projects)
+		.innerJoin(sessions, and(eq(sessions.projectId, projects.id), eq(sessions.userId, currentUser(c).id)))
+		.where(and(eq(projects.id, projectId), isNull(projects.deletedAt))).limit(1);
+	if (!owned) return c.json({ error: "project not found" }, 404);
+	const removed = await sweepEmptyUuidSessions(projectId);
+	return c.json({ removed: removed.length });
+});
+
 api.get("/api/projects/:id/work", async (c) => {
 	const projectId = Number(c.req.param("id"));
 	if (!Number.isInteger(projectId)) return c.json({ error: "bad project id" }, 400);
@@ -569,7 +598,7 @@ api.get("/api/projects/:id/work", async (c) => {
 		.select({ id: projects.id, name: projects.name, gitRemote: projects.gitRemote })
 		.from(projects)
 		.innerJoin(sessions, and(eq(sessions.projectId, projects.id), eq(sessions.userId, userId)))
-		.where(eq(projects.id, projectId))
+		.where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
 		.limit(1);
 	if (!owned) return c.json({ error: "project not found" }, 404);
 	await ensureProjectAnalysisState(userId, projectId);

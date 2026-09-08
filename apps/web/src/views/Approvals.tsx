@@ -30,31 +30,32 @@ export function Approvals() {
 					<h2>{t("approvals.pending", { n: pending.length })}</h2>
 				</header>
 				{pending.length === 0 && (
-					<div className="empty">
+					<div className="approvals-clear">
 						<NoApprovalsIllustration />
-						<h2>{t("approvals.allClear")}</h2>
-						<p>{t("approvals.nothingWaiting")}</p>
+						<div>
+							<strong>{t("approvals.allClear")}</strong>
+							<span>{t("approvals.nothingWaiting")}</span>
+						</div>
 					</div>
 				)}
 				{pending.map((a) => (
 					<article key={a.id} className="approval pending">
-						<div className="approval-head">
-							<span className="policy">{a.policyLabel}</span>
-							<span className="mono">{a.toolName}</span>
+						<div className="approval-main">
+							<div className="approval-head">
+								<span className="policy">{a.policyLabel}</span>
+								<span className="mono">{a.toolName}</span>
+								<span className="muted">{fmtTime(a.requestedAt)}</span>
+							</div>
+							<div className="approval-context">{a.projectName} · {a.sessionTitle ?? a.sessionId}</div>
+							<details className="approval-input">
+								<summary>查看调用参数</summary>
+								<pre>{JSON.stringify(a.input, null, 2)}</pre>
+							</details>
 							{a.localPrompted && <span className="hint">{t("approvals.localPrompt")}</span>}
-							<span className="muted">{fmtTime(a.requestedAt)}</span>
 						</div>
-						<div className="approval-context">
-							{a.projectName} · {a.sessionTitle ?? a.sessionId}
-						</div>
-						<pre>{JSON.stringify(a.input, null, 2)}</pre>
 						<div className="approval-actions">
-							<button className="approve" onClick={() => void decide(a.id, "approved")}>
-								{t("approvals.approve")}
-							</button>
-							<button className="deny" onClick={() => void decide(a.id, "denied")}>
-								{t("approvals.deny")}
-							</button>
+							<button className="approve" onClick={() => void decide(a.id, "approved")}>{t("approvals.approve")}</button>
+							<button className="deny" onClick={() => void decide(a.id, "denied")}>{t("approvals.deny")}</button>
 						</div>
 					</article>
 				))}

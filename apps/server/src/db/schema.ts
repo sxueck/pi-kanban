@@ -77,8 +77,9 @@ export const projects = pgTable(
 		primaryPath: text("primary_path"),
 		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 		updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+		deletedAt: timestamp("deleted_at", { withTimezone: true }),
 	},
-	(t) => [index("idx_projects_name").on(t.name)],
+	(t) => [index("idx_projects_name").on(t.name), index("idx_projects_deleted_at").on(t.deletedAt)],
 );
 
 export const sessions = pgTable(

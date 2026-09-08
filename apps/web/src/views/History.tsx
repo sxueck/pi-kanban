@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import type {
 	HistorySessionDTO,
 	ProjectHistoryDTO,
@@ -12,7 +12,7 @@ import type {
 	SessionFindingDTO,
 	SessionFindingKind,
 } from "@pi-kanban/shared";
-import { apiDownload, apiErrorMessage, apiPost, fmtCost, fmtTime, useResource } from "../api.js";
+import { apiDelete, apiDownload, apiErrorMessage, apiPost, fmtCost, fmtTime, useResource } from "../api.js";
 import { useI18n } from "../i18n.js";
 import type { MsgKey } from "../i18n.js";
 import { InspectionLogPanel } from "./InspectionLogs.js";
@@ -94,7 +94,7 @@ export function History() {
 
 export function ProjectSessions() {
 	const { t } = useI18n();
-	const { id } = useParams<{ id: string }>();
+	const navigate = useNavigate();
 	const [refreshKey, setRefreshKey] = useState(0);
 	const [memoryFilter, setMemoryFilter] = useState<ProjectMemoryStatus | "all">("all");
 	const [actionError, setActionError] = useState<string | null>(null);
@@ -104,6 +104,7 @@ export function ProjectSessions() {
 	const [updatedMemories, setUpdatedMemories] = useState<Record<string, ProjectMemoryDTO>>({});
 	const [selectedModuleId, setSelectedModuleId] = useState<string | null>(null);
 	const [showLogs, setShowLogs] = useState(false);
+	const { id } = useParams<{ id: string }>();
 	const { data: sessions, error: sessionsError } = useResource<HistorySessionDTO[]>(
 		id ? `/api/projects/${id}/sessions` : null,
 	);
@@ -153,12 +154,42 @@ export function ProjectSessions() {
 		}
 	}
 
+	async function clearEmptySessions() {
+		if (!id || !window.confirm("清空当前项目中过期的未命名空会话？")) return;
+		setActionError(null);
+		try {
+			await apiPost(`/api/projects/${id}/clear-empty-sessions`, {});
+			setRefreshKey((key) => key + 1);
+		} catch (err) {
+			setActionError(apiErrorMessage(err));
+		}
+	}
+
+	async function deleteProject() {
+		if (!id || !window.confirm("删除项目后将从项目列表隐藏；新的会话上报会自动恢复它。是否继续？")) return;
+		setActionError(null);
+		try {
+			await apiDelete(`/api/projects/${id}`);
+			navigate("/history");
+		} catch (err) {
+			setActionError(apiErrorMessage(err));
+		}
+	}
+
 	return (
 		<div className="board-layout project-detail">
 			<div className="board-main">
 				<header>
-					<h1 className="page-title">{t("sessions.title")}</h1>
-					{work && <p className="muted">{work.project.name}</p>}
+					<div>
+						<h1 className="page-title">{t("sessions.title")}</h1>
+						{work && <p className="muted">{work.project.name}</p>}
+					</div>
+					{work && (
+						<div className="project-maintenance">
+							<button type="button" className="secondary" onClick={() => void clearEmptySessions()}>清空异常会话</button>
+							<button type="button" className="danger" onClick={() => void deleteProject()}>删除项目</button>
+						</div>
+					)}
 				</header>
 				{sessionsError && <div className="error">{apiErrorMessage(sessionsError)}</div>}
 				<div className={`project-work-main${work ? " has-tree" : ""}`}>
@@ -208,7 +239,6 @@ export function ProjectSessions() {
 					<div className="rail-group">
 					<InspectionCard
 						inspection={work.inspection}
-						snapshotUpdatedAt={work.snapshotUpdatedAt}
 						busy={inspecting}
 						onInspect={() => void inspectNow()}
 						onLogs={() => setShowLogs(true)}
@@ -243,14 +273,13 @@ export function ProjectSessions() {
 	);
 }
 
-export function InspectionCard({ inspection, snapshotUpdatedAt, busy, onInspect, onLogs }: {
+export function InspectionCard({ inspection, busy, onInspect, onLogs }: {
 	inspection: ProjectInspectionDTO;
-	snapshotUpdatedAt?: number;
 	busy: boolean;
 	onInspect: () => void;
 	onLogs: () => void;
 }) {
-	const { t } = useI18n();
+	const { t, locale } = useI18n();
 	const statusClass = inspection.running ? "state-running" : inspection.enabled ? "state-idle" : "state-offline";
 	const statusLabel = inspection.running
 		? t("work.inspectRunning")
@@ -264,11 +293,9 @@ export function InspectionCard({ inspection, snapshotUpdatedAt, busy, onInspect,
 			</header>
 			<span className={`state ${statusClass}`}>{statusLabel}</span>
 			<div className="card-meta">
-				<span>{inspection.lastRunAt ? t("work.inspection.last", { time: fmtTime(inspection.lastRunAt) }) : t("work.inspection.never")}</span>
 				{inspection.enabled && inspection.nextRunAt && (
-					<span>{t("work.inspection.next", { time: fmtTime(inspection.nextRunAt) })}</span>
+					<span>{relativeTime(inspection.nextRunAt, locale)}</span>
 				)}
-				{snapshotUpdatedAt && <span>{t("work.snapshot", { time: fmtTime(snapshotUpdatedAt) })}</span>}
 			</div>
 			{!inspection.enabled && <p className="muted work-hint">{t("work.inspection.disabledHint")}</p>}
 			{!inspection.running && !busy && inspection.lastError && (
@@ -284,6 +311,13 @@ export function InspectionCard({ inspection, snapshotUpdatedAt, busy, onInspect,
 			</div>
 		</section>
 	);
+}
+
+function relativeTime(timestamp: number, locale: "zh" | "en"): string {
+	const minutes = Math.max(0, Math.round((timestamp - Date.now()) / 60_000));
+	if (minutes < 1) return locale === "zh" ? "即将执行" : "due now";
+	const [value, unit] = minutes >= 1440 ? [Math.round(minutes / 1440), "day"] : minutes >= 60 ? [Math.round(minutes / 60), "hour"] : [minutes, "minute"];
+	return new Intl.RelativeTimeFormat(locale === "zh" ? "zh-CN" : "en-US", { numeric: "auto" }).format(value, unit as Intl.RelativeTimeFormatUnit);
 }
 
 const FINDING_KIND_ORDER: SessionFindingKind[] = ["intent_drift", "context_gap", "tool_misuse", "model_error"];

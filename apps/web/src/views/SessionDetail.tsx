@@ -273,9 +273,10 @@ function TraceView({ session }: { session: SessionDetailDTO }) {
 										const expanded = expandedTurns.has(g.anchor);
 										const visibleRows = repeated && !expanded && !q ? rows.slice(0, 1) : rows;
 										return visibleRows.map((r, i) => (
-											<LedgerRow
+<LedgerRow
 												key={`${g.anchor}-${i}`}
 												record={r}
+												todo={session.todos.length > 0 ? todoProgress(session.todos) : undefined}
 												group={g}
 												turnStart={i === 0}
 												turnEnd={i === visibleRows.length - 1}
@@ -292,6 +293,7 @@ function TraceView({ session }: { session: SessionDetailDTO }) {
 										<LedgerRow
 											key={`flat-${i}`}
 											record={r}
+											todo={session.todos.length > 0 ? todoProgress(session.todos) : undefined}
 											group={null}
 											turnStart={false}
 											turnEnd={false}
@@ -420,6 +422,7 @@ function LedgerRow({
 	repeated,
 	expanded,
 	onToggle,
+	todo,
 }: {
 	record: TraceRecord;
 	group: Group | null;
@@ -428,6 +431,7 @@ function LedgerRow({
 	repeated: boolean;
 	expanded: boolean;
 	onToggle?: () => void;
+	todo?: { done: number; total: number };
 }) {
 	const { t } = useI18n();
 	const error = record.kind === "tool" && record.tool.isError;
@@ -467,13 +471,20 @@ function LedgerRow({
 			<td className="trj-content">
 				<details>
 					<summary>
-						<RecordSummary record={record} />
+						<span className="trj-summary">
+							<RecordSummary record={record} />
+							{record.kind === "tool" && todo && <span className="trj-todo">任务 {todo.done}/{todo.total}</span>}
+						</span>
 					</summary>
 					<RecordDetail record={record} />
 				</details>
 			</td>
 		</tr>
 	);
+}
+
+function todoProgress(todos: SessionDetailDTO["todos"]): { done: number; total: number } {
+	return { done: todos.filter((todo) => ["done", "completed"].includes(todo.state)).length, total: todos.length };
 }
 
 function RecordSummary({ record }: { record: TraceRecord }) {

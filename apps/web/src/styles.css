@@ -957,13 +957,44 @@ font-size: 12px;
 
 /* approvals ---------------------------------------------------------------------- */
 
+.approvals-clear {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	min-height: 88px;
+	padding: 14px 18px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--bg-card);
+	color: var(--fg-muted);
+}
+
+.approvals-clear svg {
+	width: 48px;
+	height: 48px;
+	flex: none;
+}
+
+.approvals-clear div {
+	display: grid;
+	gap: 2px;
+}
+
+.approvals-clear strong { color: var(--fg); }
+.approvals-clear span { font-size: 13px; }
+
 .approval {
+	display: flex;
+	align-items: center;
+	gap: 18px;
 	border-radius: var(--radius);
 	box-shadow: var(--shadow-card);
-	padding: 16px 18px;
-	margin-bottom: 12px;
+	padding: 14px 16px;
+	margin-bottom: 10px;
 	background: var(--bg-card);
 }
+
+.approval-main { min-width: 0; flex: 1; }
 
 .approval.pending {
 	background: var(--waiting-bg);
@@ -999,21 +1030,23 @@ font-size: 12px;
 	margin-bottom: 8px;
 }
 
-.approval pre {
+.approval-input { margin-top: 6px; }
+.approval-input summary { font-size: 12px; color: var(--fg-muted); }
+.approval-input pre {
 	background: rgba(255, 255, 255, 0.7);
 	border: 1px solid var(--border);
 	border-radius: 6px;
 	padding: 10px;
-	max-height: 260px;
+	max-height: 220px;
 	overflow: auto;
 	font-size: 12px;
-	margin: 8px 0;
+	margin: 8px 0 0;
 }
 
 .approval-actions {
 	display: flex;
 	gap: 8px;
-	margin-top: 10px;
+	flex: none;
 }
 
 a,
@@ -2764,13 +2797,13 @@ padding-left: 0;
 
 .project-work-main.has-tree {
 	display: grid;
-	grid-template-columns: minmax(200px, 280px) minmax(0, 1fr);
+	grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
 	align-items: start;
 }
 
 .tree-explorer {
 	position: sticky;
-	top: 16px;
+	top: 0;
 	display: flex;
 	flex-direction: column;
 	max-height: calc(100vh - 32px);
@@ -2954,6 +2987,36 @@ details[open] > summary .tree-twisty {
 
 .rail-card > button {
 	margin-top: 10px;
+}
+
+.project-maintenance {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+}
+
+button.danger {
+	color: var(--error);
+	border-color: color-mix(in srgb, var(--error) 35%, var(--border-strong));
+}
+
+.trj-summary {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+}
+
+.trj-todo {
+	margin-left: auto;
+	flex: none;
+	padding: 2px 7px;
+	border-radius: 999px;
+	background: var(--teal-soft);
+	color: var(--teal-deep);
+	font-size: 11px;
+	font-weight: 650;
+	white-space: nowrap;
 }
 
 .work-hint {
