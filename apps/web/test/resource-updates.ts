@@ -220,4 +220,20 @@ function makeLoader() {
 	assert.deepEqual(events, [], "a disposed loader must reject further requests");
 }
 
+// useResource survives a StrictMode remount: cleanup disposes and nulls the
+// ref, so the next request must go through a freshly built loader and land
+{
+	const first = makeLoader();
+	first.loader.request("/api/board");
+	first.loader.dispose(); // simulated unmount cleanup
+	first.fetches[0].resolve("dropped");
+	await first.flush();
+
+	const second = makeLoader(); // the rebuilt loader the request effect creates
+	second.loader.request("/api/board");
+	second.fetches[0].resolve("v1");
+	await second.flush();
+	assert.deepEqual(second.events, ["loading:true", "fetch:/api/board", "data:v1", "error:null", "loading:false"], "a loader rebuilt after dispose must load normally");
+}
+
 console.log("resource update channel checks passed");

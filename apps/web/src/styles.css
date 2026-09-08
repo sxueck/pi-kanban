@@ -3004,14 +3004,14 @@ details[open] > summary .tree-twisty {
 .inspection-actions {
 	display: flex;
 	flex-wrap: wrap;
-	gap: 10px;
+	gap: 5px;
 }
 
 .inspection-actions button {
-	min-height: 40px;
-	padding: 8px 16px;
-	font-size: 14px;
-	line-height: 20px;
+	min-height: 20px;
+	padding: 3px 8px;
+	font-size: 12px;
+	line-height: 16px;
 }
 
 .inspection-actions .secondary {
@@ -3039,7 +3039,7 @@ details[open] > summary .tree-twisty {
 .log-panel {
 	display: flex;
 	flex-direction: column;
-	width: min(1080px, 100%);
+	width: 100%;
 	height: min(82vh, 900px);
 	background: var(--bg-card);
 	border: 1px solid var(--border);
@@ -3201,6 +3201,7 @@ details[open] > summary .tree-twisty {
 .log-section pre {
 	margin: 0;
 	padding: 10px 12px;
+	max-width: none;
 	max-height: 320px;
 	overflow: auto;
 	scrollbar-width: thin;

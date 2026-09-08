@@ -339,11 +339,13 @@ export async function runDueInspections(): Promise<void> {
 	await db.update(projectInspections).set({ status: "failed", error: "interrupted", finishedAt: now }).where(and(
 		eq(projectInspections.status, "running"),
 		lt(projectInspections.startedAt, staleBefore),
+		// A bare Date interpolated into a raw sql fragment is not serializable by
+		// postgres-js (unlike mapper-typed columns); pass it as an ISO string.
 		sql`not exists (
 			select 1 from ${projectAnalysisStates}
 			where ${projectAnalysisStates.userId} = ${projectInspections.userId}
 				and ${projectAnalysisStates.projectId} = ${projectInspections.projectId}
-				and ${projectAnalysisStates.lockedAt} >= ${staleBefore}
+				and ${projectAnalysisStates.lockedAt} >= ${staleBefore.toISOString()}
 		)`,
 	));
 	const settings = await readModelSettings();
@@ -834,7 +836,7 @@ export function isStrictlyEmptyUuidSession(record: {
 		&& record.contextWindow === 0;
 }
 
-async function cleanEmptyUuidSessions(): Promise<void> {
+export async function cleanEmptyUuidSessions(): Promise<void> {
 	try {
 		const cleared = await sweepEmptyUuidSessions();
 		if (cleared.length > 0) process.stderr.write(`[pi-kanban] inspection removed ${cleared.length} empty session(s): ${cleared.join(", ")}\n`);
