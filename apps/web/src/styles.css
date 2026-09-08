@@ -430,7 +430,7 @@ h3 {
 
 /* project detail: sessions table yields width to the work rail */
 .board-layout.project-detail {
-	grid-template-columns: minmax(0, 1fr) 420px;
+	grid-template-columns: minmax(0, 1fr) clamp(240px, 25vw, 340px);
 }
 
 .board-main {
@@ -441,8 +441,6 @@ h3 {
 	display: flex;
 	flex-direction: column;
 	gap: 16px;
-	position: sticky;
-	top: 16px;
 }
 
 .board-rail .board-section {
@@ -454,6 +452,39 @@ h3 {
 	background: var(--bg-card);
 	border-radius: var(--radius);
 	box-shadow: var(--shadow-card);
+}
+
+.inspection-card {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	gap: 10px 12px;
+}
+
+.inspection-card > header,
+.inspection-card > .card-meta,
+.inspection-card > .work-hint {
+	grid-column: 1 / -1;
+}
+
+.inspection-card > header {
+	margin: 0;
+}
+
+.inspection-card > .state {
+	align-self: center;
+	margin-left: 0;
+}
+
+.inspection-card > .card-meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px 10px;
+	margin: 0;
+}
+
+.inspection-card > .inspection-actions {
+	grid-column: 1 / -1;
+	justify-self: start;
 }
 
 .chart-card > header {
@@ -1974,6 +2005,7 @@ details pre {
 	flex-wrap: wrap;
 	margin-bottom: 24px;
 	padding: 16px 18px;
+	border: 1px solid color-mix(in srgb, var(--hero-fg) 14%, transparent);
 	border-radius: var(--radius);
 	position: relative;
 	overflow: hidden;
@@ -2587,6 +2619,30 @@ overflow: auto;
 	min-height: 0;
 	border: 1px solid var(--border-strong);
 	border-radius: var(--radius);
+}
+
+/* Project-rail cards share one compact type scale. */
+.rail-group-item > header h2 {
+	font-size: 15px;
+	font-weight: 600;
+	line-height: 1.4;
+}
+
+.rail-group-item > header .count,
+.inspection-card > .state {
+	font-size: 12px;
+	font-variant-numeric: tabular-nums;
+}
+
+.rail-group-item .card-meta,
+.rail-group-item .muted,
+.rail-group-item .work-hint {
+	font-size: 12px;
+	line-height: 1.5;
+}
+
+.rail-group-item .muted {
+	margin: 8px 0 0;
 }
 
 .rail-group .rail-card {

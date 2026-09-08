@@ -258,7 +258,7 @@ export function InspectionCard({ inspection, snapshotUpdatedAt, busy, onInspect,
 			? t("work.inspection.enabled")
 			: t("work.inspection.disabled");
 	return (
-		<section className="rail-card rail-group-item">
+		<section className="rail-card rail-group-item inspection-card">
 			<header>
 				<h2>{t("work.inspection")}</h2>
 			</header>
@@ -633,7 +633,6 @@ function TreeCard({ nodes, coverage, selectedNodeId, onSelect }: {
 						{t("work.coverage.memories", { n: coverage.highConfidenceMemories })}
 					</p>
 				</div>
-				{moduleCount > 0 && <span className="count">{moduleCount}</span>}
 			</header>
 			<div className="tree-explorer-scroll">
 				{moduleCount === 0 ? (

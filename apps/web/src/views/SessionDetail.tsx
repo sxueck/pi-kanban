@@ -1,10 +1,9 @@
 import { useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import type { MessageDTO, SessionDetailDTO, ToolCallDTO, TurnDTO } from "@pi-kanban/shared";
 import { cacheHitRate, fmtCost, fmtElapsed, fmtTime, useResource } from "../api.js";
 import { useI18n } from "../i18n.js";
 import type { MsgKey } from "../i18n.js";
-import { StateIcon } from "../components/icons.js";
 
 export function SessionDetail() {
 	const { id } = useParams<{ id: string }>();
@@ -17,7 +16,6 @@ export function SessionDetail() {
 	if (loading && !data) return <div className="empty">loading…</div>;
 	if (!data) return null;
 	const s = data;
-	const pendingCount = s.approvals.filter((a) => a.status === "pending").length;
 
 	return (
 		<div className="session-detail">
@@ -51,13 +49,6 @@ export function SessionDetail() {
 					</div>
 				</header>
 
-			{pendingCount > 0 && (
-				<section className="approval-banner">
-					<StateIcon state="waiting_approval" />
-					<Link to="/approvals">{t("detail.banner", { n: pendingCount })}</Link>
-				</section>
-			)}
-
 			{s.todos.length > 0 && (
 				<section>
 					<h3>{t("detail.todos")}</h3>
@@ -68,34 +59,6 @@ export function SessionDetail() {
 							</li>
 						))}
 					</ul>
-				</section>
-			)}
-
-			{s.approvals.length > 0 && (
-				<section>
-					<h3>{t("detail.approvals")}</h3>
-					<table className="table">
-						<thead>
-							<tr>
-								<th>{t("th.when")}</th>
-								<th>{t("th.policy")}</th>
-								<th>{t("th.tool")}</th>
-								<th>{t("th.state")}</th>
-								<th>{t("th.by")}</th>
-							</tr>
-						</thead>
-						<tbody>
-							{s.approvals.map((a) => (
-								<tr key={a.id}>
-									<td>{fmtTime(a.requestedAt)}</td>
-									<td>{a.policyLabel}</td>
-									<td className="mono">{a.toolName}</td>
-									<td className={`status-${a.status}`}>{t(`approvals.status.${a.status}` as MsgKey)}</td>
-									<td>{a.decidedBy ?? (a.status === "local_resolved" ? t("approvals.localTui") : "—")}</td>
-								</tr>
-							))}
-						</tbody>
-					</table>
 				</section>
 			)}
 
