@@ -102,15 +102,12 @@ export function Board() {
 					onStateFilter={setStateFilter}
 					chips={chips}
 				/>
-				{SECTION_ORDER.filter(({ state }) => stateFilter === "all" || state === stateFilter).map(({ state }) => (
-					<BoardSection key={state} state={state} list={visibleByState.get(state) ?? []} />
-				))}
 				{(recentFiltered.length > 0 || !filtersActive) && (
 					<section className="board-section recent-section">
 						<header>
 							<h2>{t("board.recent")}</h2>
 						</header>
-						{(recentFiltered.length ?? 0) === 0 ? (
+						{recentFiltered.length === 0 ? (
 							<p className="muted">{t("board.noRecent")}</p>
 						) : (
 							<div className="recent-cards">
@@ -119,6 +116,9 @@ export function Board() {
 						)}
 					</section>
 				)}
+				{SECTION_ORDER.filter(({ state }) => stateFilter === "all" || state === stateFilter).map(({ state }) => (
+					<BoardSection key={state} state={state} list={visibleByState.get(state) ?? []} />
+				))}
 				{filtersActive && total === 0 && recentFiltered.length === 0 && (
 					<div className="empty">
 						<h2>{t("board.noMatch")}</h2>
@@ -445,7 +445,6 @@ function SessionCard({ session: s }: { session: BoardSession }) {
 						<span className="context-bar">
 							<span className={`context-fill${contextPct >= 90 ? " hot" : ""}`} style={{ width: `${contextPct}%` }} />
 						</span>
-						{contextPct}%
 					</span>
 				)}
 				{s.pendingApprovals > 0 && (
