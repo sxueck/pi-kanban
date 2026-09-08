@@ -94,7 +94,7 @@ async function resolveProjectId(
 		if (existing.length > 0) {
 			await db
 				.update(projects)
-				.set({ updatedAt: new Date() })
+				.set({ updatedAt: new Date(), deletedAt: null })
 				.where(eq(projects.id, existing[0].id));
 			return existing[0].id;
 		}
@@ -118,7 +118,10 @@ async function resolveProjectId(
 		.from(projects)
 		.where(eq(projects.primaryPath, cwd))
 		.limit(1);
-	if (existing.length > 0) return existing[0].id;
+	if (existing.length > 0) {
+		await db.update(projects).set({ deletedAt: null, updatedAt: new Date() }).where(eq(projects.id, existing[0].id));
+		return existing[0].id;
+	}
 	const [created] = await db
 		.insert(projects)
 		.values({ name: path.basename(cwd) || cwd, primaryPath: cwd })

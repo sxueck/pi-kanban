@@ -846,7 +846,7 @@ export async function cleanEmptyUuidSessions(): Promise<void> {
 }
 
 /** Remove stale UUID placeholder sessions only when neither content nor project artifacts exist. */
-export async function sweepEmptyUuidSessions(): Promise<string[]> {
+export async function sweepEmptyUuidSessions(projectId?: number): Promise<string[]> {
 	const cutoff = new Date(Date.now() - EMPTY_SESSION_RETENTION_MS);
 	const predicate = and(
 		sql`${sessions.id} ~ ${EMPTY_SESSION_ID}`,
@@ -868,6 +868,7 @@ export async function sweepEmptyUuidSessions(): Promise<string[]> {
 		sql`not exists (select 1 from ${todoLists} where ${todoLists.sessionId} = ${sessions.id})`,
 		sql`not exists (select 1 from ${approvals} where ${approvals.sessionId} = ${sessions.id})`,
 		sql`not exists (select 1 from ${projectSnapshots} where ${projectSnapshots.sessionId} = ${sessions.id})`,
+		...(projectId === undefined ? [] : [eq(sessions.projectId, projectId)]),
 	);
 	const removed = await db.delete(sessions).where(predicate).returning({ id: sessions.id });
 	return removed.map((session) => session.id);
