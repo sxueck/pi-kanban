@@ -279,21 +279,27 @@ export function useResource<T>(path: string | null, refreshKey = 0): {
 	const [loading, setLoading] = useState(true);
 	const [version, setVersion] = useState(0);
 	const loaderRef = useRef<ResourceLoader | null>(null);
-	if (loaderRef.current === null) {
-		loaderRef.current = createResourceLoader<T>(apiGet, {
-			data: setData,
-			error: setError,
-			loading: setLoading,
-		});
-	}
+	const buildLoader = () => createResourceLoader<T>(apiGet, {
+		data: setData,
+		error: setError,
+		loading: setLoading,
+	});
+	if (loaderRef.current === null) loaderRef.current = buildLoader();
 
 	const refetch = useCallback(() => setVersion((v) => v + 1), []);
 
-	useEffect(() => () => loaderRef.current?.dispose(), []);
+	// Cleanup nulls the ref, not just disposes: StrictMode's simulated remount
+	// reuses the ref, and a permanently disposed loader would silently drop the
+	// remount's requests (every page stuck on loading in dev).
+	useEffect(() => () => {
+		loaderRef.current?.dispose();
+		loaderRef.current = null;
+	}, []);
 
 	useEffect(() => {
 		if (!path) return;
-		loaderRef.current?.request(path);
+		if (loaderRef.current === null) loaderRef.current = buildLoader();
+		loaderRef.current.request(path);
 	}, [path, version, refreshKey]);
 
 	// One app-wide stream refreshes all mounted resources without consuming one

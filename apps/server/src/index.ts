@@ -6,7 +6,7 @@ import { api } from "./api.js";
 import { runMigrations } from "./migrate.js";
 import { agentWss, handleUpgrade } from "./ws.js";
 import { sweepExpiredApprovals, sweepOfflineSessions } from "./approvals.js";
-import { runDueInspections } from "./inspector.js";
+import { cleanEmptyUuidSessions, runDueInspections } from "./inspector.js";
 
 const rootEnvFile = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../.env");
 if (existsSync(rootEnvFile)) process.loadEnvFile(rootEnvFile);
@@ -44,9 +44,19 @@ const sweeper = setInterval(() => {
 }, SWEEP_INTERVAL_MS);
 sweeper.unref();
 
+// Untitled placeholder sessions are swept hourly on their own cadence, not
+// only when an inspection happens to be queued.
+const UNTITLED_SESSION_SWEEP_MS = 60 * 60_000;
+const untitledSweeper = setInterval(() => void cleanEmptyUuidSessions(), UNTITLED_SESSION_SWEEP_MS);
+untitledSweeper.unref();
+// Boot-time pass so rows that went stale while the server was down do not
+// wait a full interval.
+void cleanEmptyUuidSessions();
+
 function shutdown() {
 	console.log("[pi-kanban] shutting down");
 	clearInterval(sweeper);
+	clearInterval(untitledSweeper);
 	server.close(() => process.exit(0));
 	setTimeout(() => process.exit(0), 3_000).unref();
 }
