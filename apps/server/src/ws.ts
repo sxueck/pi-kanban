@@ -4,7 +4,7 @@ import { PROTOCOL_VERSION } from "@pi-kanban/shared";
 import { handleUpstream } from "./ingest.js";
 import { authenticateAgentToken } from "./auth.js";
 
-interface AgentConnection {
+export interface AgentConnection {
 	ws: WebSocket;
 	machineId: string;
 	machineName?: string;
@@ -17,10 +17,36 @@ interface AgentConnection {
 	queue: Promise<void>;
 }
 
-const connections = new Map<string, AgentConnection>(); // userId:machineId -> conn
+// userId:machineId -> live connections. Every pi session on a machine holds
+// its own socket; approval decisions must reach the session that opened the
+// approval, so delivery broadcasts to all of them (plugins ignore decisions
+// for approvalIds they never requested).
+const connections = new Map<string, Set<AgentConnection>>();
 const sockets = new WeakMap<WebSocket, AgentConnection>();
 
 export const agentWss = new WebSocketServer({ noServer: true });
+
+/** Registers an authenticated connection under its machine. */
+export function registerConnection(conn: AgentConnection): void {
+	if (!conn.userId || !conn.machineId) return;
+	const key = connectionKey(conn.userId, conn.machineId);
+	let set = connections.get(key);
+	if (!set) {
+		set = new Set();
+		connections.set(key, set);
+	}
+	set.add(conn);
+}
+
+/** Drops a closed connection; the machine's other connections keep receiving. */
+export function unregisterConnection(conn: AgentConnection): void {
+	if (!conn.userId || !conn.machineId) return;
+	const key = connectionKey(conn.userId, conn.machineId);
+	const set = connections.get(key);
+	if (!set) return;
+	set.delete(conn);
+	if (set.size === 0) connections.delete(key);
+}
 
 const HELLO_TIMEOUT_MS = 10_000;
 
@@ -51,9 +77,7 @@ export function handleUpgrade(ws: WebSocket): void {
 	});
 	ws.on("close", () => {
 		clearTimeout(helloTimer);
-		if (conn.machineId && connections.get(connectionKey(conn.userId, conn.machineId))?.ws === ws) {
-			connections.delete(connectionKey(conn.userId, conn.machineId));
-		}
+		unregisterConnection(conn);
 	});
 	ws.on("error", () => ws.close());
 }
@@ -113,8 +137,7 @@ async function authenticate(
 	conn.machineName = hello.machineName;
 	conn.userId = agent.userId;
 	conn.authenticated = true;
-	// Last connection per machine wins.
-	connections.set(connectionKey(agent.userId, hello.machineId), conn);
+	registerConnection(conn);
 	return { type: "hello_ack", ok: true, serverTime: Date.now() };
 }
 
@@ -134,16 +157,21 @@ function reportIngestError(conn: AgentConnection, msg: UpstreamMessage, error: u
 	send(conn.ws, { type: "error", message: `ingest failed for ${msg.type}` });
 }
 
-/** Best-effort downstream push; returns false when the machine is offline. */
+/** Best-effort downstream push; returns true when at least one socket took it. */
 export function sendToMachine(
 	userId: string,
 	machineId: string,
 	msg: DownstreamMessage,
 ): boolean {
-	const conn = connections.get(connectionKey(userId, machineId));
-	if (!conn || conn.ws.readyState !== conn.ws.OPEN) return false;
-	send(conn.ws, msg);
-	return true;
+	const set = connections.get(connectionKey(userId, machineId));
+	if (!set) return false;
+	let delivered = false;
+	for (const conn of set) {
+		if (conn.ws.readyState !== conn.ws.OPEN) continue;
+		send(conn.ws, msg);
+		delivered = true;
+	}
+	return delivered;
 }
 
 function connectionKey(userId: string, machineId: string): string {
@@ -157,13 +185,15 @@ function connectionKey(userId: string, machineId: string): string {
 // approval decisions pushed via sendToMachine.
 const PING_INTERVAL_MS = 30_000;
 const keepalive = setInterval(() => {
-	for (const conn of connections.values()) {
-		if (!conn.isAlive) {
-			conn.ws.terminate();
-			continue;
+	for (const set of connections.values()) {
+		for (const conn of set) {
+			if (!conn.isAlive) {
+				conn.ws.terminate();
+				continue;
+			}
+			conn.isAlive = false;
+			conn.ws.ping();
 		}
-		conn.isAlive = false;
-		conn.ws.ping();
 	}
 }, PING_INTERVAL_MS);
 keepalive.unref();
