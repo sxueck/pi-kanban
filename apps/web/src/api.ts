@@ -63,6 +63,21 @@ export async function apiDelete(path: string): Promise<void> {
 	if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
 }
 
+/** Authenticated file download (Bearer header rules out plain link navigation). */
+export async function apiDownload(path: string, filename: string): Promise<void> {
+	const res = await fetch(`${API_BASE}${path}`, {
+		headers: { authorization: `Bearer ${getToken()}` },
+	});
+	if (res.status === 401) throwUnauthorized();
+	if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+	const url = URL.createObjectURL(await res.blob());
+	const anchor = document.createElement("a");
+	anchor.href = url;
+	anchor.download = filename;
+	anchor.click();
+	URL.revokeObjectURL(url);
+}
+
 /**
  * Extract a friendly message from an apiGet/apiPost error. Non-2xx responses
  * throw `${status} ${body}` where body is usually `{"error": "..."}` JSON.

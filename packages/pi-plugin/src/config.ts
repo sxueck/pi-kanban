@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, hostname } from "node:os";
 import { randomUUID } from "node:crypto";
+import type { Notify } from "./notify.js";
 import type { PluginConfig } from "@pi-kanban/shared";
 
 export const PLUGIN_VERSION = "0.1.0";
@@ -58,7 +59,7 @@ export function normalizeServerUrl(raw: string): string {
 	}
 }
 
-export function loadConfig(): PluginConfig {
+export function loadConfig(onWarning?: Notify): PluginConfig {
 	const configPath = join(agentDir(), "pi-kanban.json");
 	const config = defaultConfig();
 	if (existsSync(configPath)) {
@@ -68,14 +69,16 @@ export function loadConfig(): PluginConfig {
 				// Migration: tokens were once kept in the config file; they are env-only now.
 				if ("agentToken" in raw.server) {
 					delete (raw.server as { agentToken?: unknown }).agentToken;
-					console.error(`[pi-kanban] server.agentToken in ${configPath} is ignored — set the PI_KANBAN_TOKEN environment variable instead`);
+					onWarning?.(
+						`server.agentToken in ${configPath} is ignored — set the PI_KANBAN_TOKEN environment variable instead`,
+					);
 				}
 				Object.assign(config.server, raw.server);
 			}
 			if (raw.gate) Object.assign(config.gate, raw.gate);
 			if (raw.report) Object.assign(config.report, raw.report);
 		} catch (error) {
-			console.error(`[pi-kanban] invalid config at ${configPath}:`, error);
+			onWarning?.(`invalid config at ${configPath}`, error);
 		}
 	}
 	// Env wins over the config file — documented as an environment override.

@@ -19,6 +19,7 @@
 	},
 	"devDependencies": {
 		"@earendil-works/pi-coding-agent": "^0.84.3",
+		"@earendil-works/pi-tui": "0.84.4",
 		"@pi-kanban/shared": "workspace:*",
 		"@types/node": "^22.10.0",
 		"esbuild": "^0.25.0",

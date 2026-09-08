@@ -81,6 +81,9 @@ importers:
       '@earendil-works/pi-coding-agent':
         specifier: ^0.84.3
         version: 0.84.4(ws@8.21.3)
+      '@earendil-works/pi-tui':
+        specifier: 0.84.4
+        version: 0.84.4
       '@pi-kanban/shared':
         specifier: workspace:*
         version: link:../shared

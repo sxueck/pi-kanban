@@ -9,8 +9,10 @@ import type {
 	ProjectMemoryStatus,
 	ProjectTreeNodeDTO,
 	ProjectWorkDTO,
+	SessionFindingDTO,
+	SessionFindingKind,
 } from "@pi-kanban/shared";
-import { apiErrorMessage, apiPost, fmtCost, fmtTime, useResource } from "../api.js";
+import { apiDownload, apiErrorMessage, apiPost, fmtCost, fmtTime, useResource } from "../api.js";
 import { useI18n } from "../i18n.js";
 import type { MsgKey } from "../i18n.js";
 import { InspectionLogPanel } from "./InspectionLogs.js";
@@ -216,9 +218,11 @@ export function ProjectSessions() {
 							onStatus={setStatus}
 						/>
 					)}
+					<FindingsCard findings={work.findings} />
 					<MemoriesCard
 						memories={memories}
 						insights={rootInsights}
+						projectId={work.project.id}
 						pending={pendingMemories}
 						filter={memoryFilter}
 						onFilter={setMemoryFilter}
@@ -277,18 +281,94 @@ export function InspectionCard({ inspection, snapshotUpdatedAt, busy, onInspect,
 	);
 }
 
+const FINDING_KIND_ORDER: SessionFindingKind[] = ["intent_drift", "context_gap", "tool_misuse", "model_error"];
+
+export function FindingsCard({ findings }: { findings: SessionFindingDTO[] }) {
+	const { t } = useI18n();
+	return (
+		<section className={`board-section rail-group-item memories-section findings-section${findings.length === 0 ? " is-empty" : ""}`}>
+			<header>
+				<h2>{t("work.findings")}</h2>
+				<span className="count">{findings.length}</span>
+			</header>
+			{findings.length === 0 ? (
+				<p className="muted">{t("work.findings.empty")}</p>
+			) : (
+				<div className="memory-scroll">
+				{FINDING_KIND_ORDER.map((kind) => {
+					const items = findings.filter((finding) => finding.kind === kind);
+					if (items.length === 0) return null;
+					return (
+						<div key={kind} className="memory-group">
+							<h3 className="memory-group-title">
+								{t(`finding.kind.${kind}` as MsgKey)}
+							<span className="count">{items.length}</span>
+						</h3>
+						<ul className="memory-list">
+							{items.map((finding) => (
+								<FindingItem key={finding.id} finding={finding} />
+							))}
+						</ul>
+					</div>
+				);
+				})}
+			</div>
+		)}
+	</section>
+	);
+}
+
+function FindingItem({ finding }: { finding: SessionFindingDTO }) {
+	const { t } = useI18n();
+	return (
+		<li className={`insight-item severity-${finding.severity}`}>
+			<div className="insight-head">
+				{finding.sessionId ? (
+					<Link className="insight-label" to={`/sessions/${finding.sessionId}`} title={finding.sessionId}>
+						{finding.summary}
+					</Link>
+				) : (
+					<span className="insight-label">{finding.summary}</span>
+				)}
+			</div>
+			{finding.detail && <p className="work-detail">{finding.detail}</p>}
+			<div className="memory-meta">
+				{fmtTime(finding.createdAt)}
+				{finding.occurrenceCount > 1 && <> · {t("finding.seen", { n: finding.occurrenceCount })} · {t("finding.lastSeen", { time: fmtTime(finding.lastSeenAt) })}</>}
+			</div>
+		</li>
+	);
+}
+
 const MEMORY_FILTERS: Array<ProjectMemoryStatus | "all"> = ["all", "candidate", "confirmed", "pinned", "archived"];
 const MEMORY_KIND_ORDER: ProjectMemoryKind[] = ["decision", "fact", "preference", "pattern", "issue"];
 
-export function MemoriesCard({ memories, insights, pending, filter, onFilter, onStatus }: {
+export function MemoriesCard({ memories, insights, projectId, pending, filter, onFilter, onStatus }: {
 	memories: ProjectMemoryDTO[];
 	insights: ProjectTreeNodeDTO[];
+	projectId: number;
 	pending: Set<string>;
 	filter: ProjectMemoryStatus | "all";
 	onFilter: (filter: ProjectMemoryStatus | "all") => void;
 	onStatus: (memoryId: string, status: ProjectMemoryStatus) => void;
 }) {
 	const { t } = useI18n();
+	const [exporting, setExporting] = useState(false);
+	const [exportDone, setExportDone] = useState(false);
+	const [exportError, setExportError] = useState<string | null>(null);
+	async function exportReferenceRules() {
+		setExporting(true);
+		setExportDone(false);
+		setExportError(null);
+		try {
+			await apiDownload(`/api/projects/${projectId}/memories/reference-rules`, `PROJECT-RULE-SUGGESTIONS-${projectId}.md`);
+			setExportDone(true);
+		} catch (err) {
+			setExportError(apiErrorMessage(err));
+		} finally {
+			setExporting(false);
+		}
+	}
 	const filtered = (filter === "all" ? [...memories] : memories.filter((m) => m.status === filter))
 		.sort((a, b) => Number(b.status === "pinned") - Number(a.status === "pinned") || b.createdAt - a.createdAt || a.id.localeCompare(b.id));
 	const groups = useMemo(() => {
@@ -315,7 +395,17 @@ export function MemoriesCard({ memories, insights, pending, filter, onFilter, on
 			<header>
 				<h2>{t("work.memories")}</h2>
 				<span className="count">{memories.length}</span>
+				<button
+					type="button"
+					className="secondary memory-export"
+					disabled={exporting || memories.length === 0}
+					title={exportDone ? t("work.memory.exported") : undefined}
+					onClick={() => void exportReferenceRules()}
+				>
+					{exportDone ? t("work.memory.exported") : t("work.memory.export")}
+				</button>
 			</header>
+			{exportError && <div className="error" role="alert">{exportError}</div>}
 			{memories.length === 0 ? (
 				<p className="muted">{t("work.memory.empty")}</p>
 			) : (
@@ -420,7 +510,10 @@ function MemoryItem({ memory, busy, onStatus }: { memory: ProjectMemoryDTO; busy
 				</span>
 			</div>
 			<p className="memory-content">{memory.content}</p>
-			<div className="memory-meta">{fmtTime(memory.createdAt)} · v{memory.version}</div>
+			<div className="memory-meta">
+				{fmtTime(memory.createdAt)} · v{memory.version}
+				{memory.occurrenceCount > 1 && <> · {t("work.memory.seen", { n: memory.occurrenceCount })} · {t("work.memory.lastSeen", { time: fmtTime(memory.lastSeenAt) })}</>}
+			</div>
 			{memory.evidence.length > 0 && (
 				<div className="memory-evidence">
 					<span className="muted">{t("memory.evidence")}</span>

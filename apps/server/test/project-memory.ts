@@ -11,15 +11,20 @@ import {
 	requestInspection,
 	requestInspectionAgent,
 	requestInspectionStreaming,
+	SYSTEM_PROMPT,
 	ToolCapabilityError,
 } from "../src/model.js";
 import {
 	assembleInspectionInput,
+	dedupeInspectionFindings,
+	findingRecurrenceKey,
 	INPUT_LIMITS,
 	INSPECTION_LOCK_TTL_MS,
 	MAX_INSPECTION_BATCHES,
 	mergeInspectionResults,
+	planMemoryConsolidation,
 	redactInspectionResult,
+	renderReferenceRulesMarkdown,
 	retainStructureModuleIds,
 	splitInspectionBatches,
 	isStrictlyEmptyUuidSession,
@@ -150,10 +155,12 @@ try {
 	const outputWithPii = redactInspectionResult({
 		memories: [{ kind: "fact", content: "Owner is alice" + "@example.com", confidence: "high", moduleIds: [], evidence: [] }],
 		tree: [{ id: "insight:1", kind: "issue", label: "Host 192.168.10.20" }],
+		findings: [{ kind: "model_error", severity: "warning", summary: "Provider 503s hit alice" + "@example.com", evidence: [] }],
 	});
-	assert.ok(outputWithPii.count >= 2);
+	assert.ok(outputWithPii.count >= 3);
 	assert.ok(!outputWithPii.value.memories[0]?.content.includes("alice@example.com"));
 	assert.ok(!outputWithPii.value.tree[0]?.label.includes("192.168.10.20"));
+	assert.ok(!outputWithPii.value.findings[0]?.summary.includes("alice@example.com"), "finding summaries are redacted like memory content");
 	assert.throws(() => parseInspectionResult("not-json"));
 	await assert.rejects(readResponseText(new Response("12345"), 4), /size limit/);
 	await assert.rejects(readResponseText(new Response("x", { headers: { "content-length": "10" } }), 4), /size limit/);
@@ -281,6 +288,9 @@ try {
 	// daily interval with an all-day window advances exactly one day
 	assert.equal(computeNextInspectionAt(workweek({ intervalMinutes: 1440 }), new Date(2026, 0, 1, 10, 0)).getTime(), new Date(2026, 0, 2, 0, 0).getTime());
 
+	assert.ok(SYSTEM_PROMPT.includes("the model's actions or conclusions departed from the user's stated goal"));
+	assert.ok(SYSTEM_PROMPT.includes("do not flag the user for intentionally changing the goal"));
+
 	// Model memory associations are bounded and deduplicated before persistence validation.
 	assert.deepEqual(
 		parseInspectionResult(JSON.stringify({
@@ -297,6 +307,89 @@ try {
 		),
 		[{ kind: "fact", content: "filtered", confidence: "high", moduleIds: ["path:apps/web"], evidence: [] }],
 	);
+
+	// --- cross-inspection memory consolidation (pure planner) -----------------
+	const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+	const consolidation = planMemoryConsolidation([
+		{ kind: "fact", content: "Depends on CRD X", confidence: "high", moduleIds: [], evidence: [], action: "reinforce", targetId: uuid(1) },
+		{ kind: "fact", content: "Uses PostgreSQL 16 (not 15)", confidence: "high", moduleIds: [], evidence: [], action: "supersede", targetId: uuid(2) },
+		{ kind: "fact", content: "brand new", confidence: "high", moduleIds: [], evidence: [] },
+		{ kind: "fact", content: "broken link", confidence: "high", moduleIds: [], evidence: [], action: "reinforce", targetId: uuid(9) },
+		{ kind: "fact", content: "already known", confidence: "high", moduleIds: [], evidence: [] },
+	], [
+		{ memoryKey: uuid(1), content: "depends on crd x" },
+		{ memoryKey: uuid(2), content: "uses postgresql 15" },
+		{ memoryKey: uuid(3), content: "already known" },
+	]);
+	assert.deepEqual(consolidation.reinforces.map((entry) => entry.targetId), [uuid(1)]);
+	assert.deepEqual(consolidation.supersedes.map((entry) => entry.targetId), [uuid(2)]);
+	assert.deepEqual(consolidation.inserts.map((memory) => memory.content), ["brand new", "broken link"], "an unresolvable target degrades to a fresh insert");
+	// duplicate claims against one target collapse to the first
+	const doubleReinforce = planMemoryConsolidation([
+		{ kind: "fact", content: "a", confidence: "high", moduleIds: [], evidence: [], action: "reinforce", targetId: uuid(1) },
+		{ kind: "fact", content: "b", confidence: "high", moduleIds: [], evidence: [], action: "reinforce", targetId: uuid(1) },
+	], [{ memoryKey: uuid(1), content: "x" }]);
+	assert.equal(doubleReinforce.reinforces.length, 1);
+	assert.equal(doubleReinforce.inserts.length, 0, "later claims for the same active memory must not create duplicates");
+
+	// parser admits consolidation links and session findings, dropping malformed ones
+	const withActions = parseInspectionResult(JSON.stringify({
+		memories: [
+			{ kind: "fact", content: "reinforced", confidence: "high", moduleIds: [], evidence: [], action: "reinforce", targetId: uuid(1) },
+			{ kind: "fact", content: "bad action", confidence: "high", moduleIds: [], evidence: [], action: "delete", targetId: uuid(1) },
+			{ kind: "fact", content: "bad target", confidence: "high", moduleIds: [], evidence: [], action: "supersede", targetId: "not-a-uuid" },
+		],
+		tree: [],
+		findings: [
+			{ kind: "context_gap", severity: "warning", summary: "User omitted file paths; model re-asked", sessionId: "s1", turnPosition: 2, evidence: [{ sessionId: "s1", turnPosition: 2 }] },
+			{ kind: "intent_drift", severity: "info", summary: "Model ignored the user's stated goal" },
+			{ kind: "nonsense", severity: "info", summary: "dropped" },
+			{ kind: "model_error", summary: "severity defaults to info" },
+		],
+	}));
+	assert.deepEqual(withActions.memories.map((memory) => memory.action ?? "new"), ["reinforce", "new", "new"], "malformed action/target pairs degrade to plain candidates");
+	assert.deepEqual(withActions.findings.map((finding) => finding.kind), ["context_gap", "intent_drift", "model_error"]);
+	assert.equal(withActions.findings[0]?.sessionId, "s1");
+	assert.equal(withActions.findings[2]?.severity, "info");
+	assert.deepEqual(
+		dedupeInspectionFindings([
+			{ kind: "model_error", severity: "error", summary: "Provider timeout", sessionId: "s1", evidence: [] },
+			{ kind: "model_error", severity: "warning", summary: " provider TIMEOUT ", sessionId: "s1", evidence: [] },
+			{ kind: "model_error", severity: "error", summary: "Provider timeout", sessionId: "s2", evidence: [] },
+		]).map((finding) => finding.sessionId),
+		["s1", "s2"],
+		"one inspection persists at most one finding per recurrence key",
+	);
+
+	// findings merge across batch fallbacks dedupes by recurrence key
+	const mergedFindings = mergeInspectionResults([
+		{ memories: [], tree: [], findings: [{ kind: "model_error", severity: "error", summary: "429 rate limit", evidence: [] }] },
+		{ memories: [], tree: [], findings: [
+			{ kind: "model_error", severity: "error", summary: "429 RATE limit", evidence: [] },
+			{ kind: "intent_drift", severity: "warning", summary: "pivot", evidence: [] },
+		] },
+	]);
+	assert.deepEqual(mergedFindings.findings.map((finding) => finding.summary), ["429 rate limit", "pivot"]);
+	assert.equal(findingRecurrenceKey({ kind: "model_error", sessionId: "s1", summary: "429 Rate limit" }), findingRecurrenceKey({ kind: "model_error", sessionId: "s1", summary: "429 rate limit" }));
+	assert.notEqual(findingRecurrenceKey({ kind: "model_error", sessionId: "s1", summary: "x" }), findingRecurrenceKey({ kind: "model_error", summary: "x" }), "cross-session and per-session findings stay separate");
+
+	// Reference export includes confirmed/pinned memories without posing as a replacement AGENTS.md.
+	const referenceRules = renderReferenceRulesMarkdown("pi-kanban", [
+		{ kind: "fact", content: "Web app depends on api-server", status: "confirmed", moduleIds: ["path:apps/web"], occurrenceCount: 3 },
+		{ kind: "decision", content: "Use PostgreSQL", status: "pinned", moduleIds: [], occurrenceCount: 1 },
+		{ kind: "issue", content: "candidate dropped", status: "candidate", moduleIds: [], occurrenceCount: 1 },
+	], [
+		{ id: "project", kind: "project", label: "pi-kanban" },
+		{ id: "path:apps/web", parentId: "project", kind: "module", label: "apps/web" },
+	]);
+	assert.ok(referenceRules.startsWith("# pi-kanban: suggested project rules"));
+	assert.ok(referenceRules.includes("Reference only"));
+	assert.ok(referenceRules.includes("Do not replace an existing AGENTS.md"));
+	assert.ok(referenceRules.includes("## apps/web"));
+	assert.ok(referenceRules.includes("- [fact] Web app depends on api-server (seen 3×)"));
+	assert.ok(referenceRules.includes("## General"));
+	assert.ok(referenceRules.includes("- [decision] Use PostgreSQL"));
+	assert.ok(!referenceRules.includes("candidate dropped"));
 
 	// --- bounded, deterministic model input -----------------------------------
 	assert.equal(INPUT_LIMITS.knownMemories, 200);
@@ -337,6 +430,7 @@ try {
 		{
 			memories: [{ kind: "decision", content: "Use PostgreSQL", confidence: "high", moduleIds: [], evidence: [] }],
 			tree: [{ id: "insight:0", kind: "issue", label: "first batch" }],
+			findings: [],
 		},
 		{
 			memories: [
@@ -344,6 +438,7 @@ try {
 				{ kind: "fact", content: "second batch", confidence: "high", moduleIds: [], evidence: [] },
 			],
 			tree: [{ id: "insight:0", kind: "issue", label: "second batch" }],
+			findings: [],
 		},
 	]);
 	assert.deepEqual(merged.memories.map((memory) => memory.content), ["Use PostgreSQL", "second batch"]);
@@ -407,7 +502,7 @@ try {
 		fetchCalls.length = 0;
 		mockFetch(() => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ memories: [], tree: [] }) } }] }), { status: 200, headers: { "content-type": "application/json" } }));
 		const happy = await requestInspection(testConnection, { project: { name: "pi-kanban" } }, { timeoutMs: 2_000, purpose: "unit" });
-		assert.deepEqual(happy.result, { memories: [], tree: [] });
+		assert.deepEqual(happy.result, { memories: [], tree: [], findings: [] });
 		assert.equal(happy.content, JSON.stringify({ memories: [], tree: [] }));
 		assert.equal(happy.reasoning, undefined);
 		assert.equal(fetchCalls.length, 1);
@@ -444,7 +539,7 @@ try {
 			executeTool: async (call) => ({ content: { sessions: [{ id: call.arguments.limit === 1 ? "s1" : "unexpected" }], detail: "x".repeat(20_000) }, redactionCount: 1, audit: { source: "test" } }),
 			onTool: (step) => agentSteps.push(`${step.round}:${step.tool}:${step.status}`),
 		});
-		assert.deepEqual(agent.result, { memories: [], tree: [] });
+		assert.deepEqual(agent.result, { memories: [], tree: [], findings: [] });
 		assert.equal(agentRequestCount, 2);
 		assert.deepEqual(agentSteps, ["1:list_sessions:completed"]);
 		assert.equal(agent.steps[0]?.redactionCount, 1);
@@ -496,7 +591,7 @@ try {
 		], "deltas must arrive per chunk in order");
 		assert.equal(streamed.reasoning, "weighing evidence");
 		assert.equal(streamed.content, payloadJson);
-		assert.deepEqual(streamed.result, { memories: [], tree: [] });
+		assert.deepEqual(streamed.result, { memories: [], tree: [], findings: [] });
 		assert.equal(streamActivity, 1, "one raw SSE body chunk reports stream activity even when it contains multiple events");
 		assert.equal(JSON.parse(String(fetchCalls.at(-1)?.init?.body)).stream, true, "streaming requests must ask for stream:true");
 		// A valid SSE stream may run longer than one timeout window as long as
@@ -512,7 +607,7 @@ try {
 			{ status: 200, headers: { "content-type": "text/event-stream" } },
 		));
 		const longLivedStream = await requestInspectionStreaming(testConnection, {}, { timeoutMs: 120 });
-		assert.deepEqual(longLivedStream.result, { memories: [], tree: [] }, "SSE activity must reset the inspection idle timeout");
+		assert.deepEqual(longLivedStream.result, { memories: [], tree: [], findings: [] }, "SSE activity must reset the inspection idle timeout");
 		// a chunk boundary splitting one SSE block mid-JSON must still assemble
 		const splitEncoded = new TextEncoder().encode(sseData({ choices: [{ delta: { content: payloadJson } }] }) + "data: [DONE]\n\n");
 		mockFetch(() => new Response(
@@ -526,7 +621,7 @@ try {
 			{ status: 200, headers: { "content-type": "text/event-stream" } },
 		));
 		const reassembled = await requestInspectionStreaming(testConnection, {}, { timeoutMs: 2_000 });
-		assert.deepEqual(reassembled.result, { memories: [], tree: [] });
+		assert.deepEqual(reassembled.result, { memories: [], tree: [], findings: [] });
 		// a \r\n pair split across chunk boundaries must not lose a block separator
 		const crlfBlock = (text: string) => `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\r\n\r\n`;
 		const crlfEncoded = new TextEncoder().encode(
@@ -546,7 +641,7 @@ try {
 		));
 		const crlfStreamed = await requestInspectionStreaming(testConnection, {}, { timeoutMs: 2_000, onDelta: (d) => crlfDeltas.push(d) });
 		assert.deepEqual(crlfDeltas.map((d) => d.text), [payloadJson.slice(0, 10), payloadJson.slice(10)], "CRLF separators split across chunks must still delimit blocks");
-		assert.deepEqual(crlfStreamed.result, { memories: [], tree: [] });
+		assert.deepEqual(crlfStreamed.result, { memories: [], tree: [], findings: [] });
 		// provider rejects streaming → exactly one buffered retry, result re-emitted as one delta batch
 		let fallbackCalls = 0;
 		mockFetch(() => {
@@ -559,7 +654,7 @@ try {
 		const fellBack = await requestInspectionStreaming(testConnection, {}, { timeoutMs: 2_000, onDelta: (d) => fallbackDeltas.push(d) });
 		assert.equal(fallbackCalls, 2, "exactly one buffered retry");
 		assert.deepEqual(fallbackDeltas.map((d) => d.type), ["content"], "fallback text arrives as one batch");
-		assert.deepEqual(fellBack.result, { memories: [], tree: [] });
+		assert.deepEqual(fellBack.result, { memories: [], tree: [], findings: [] });
 		// A streaming fallback shares the first request's deadline; a late 400
 		// cannot grant a second full timeout and overrun the inspection lock.
 		let delayedFallbackCalls = 0;
@@ -582,7 +677,7 @@ try {
 		const ignoredDeltas: InspectionDelta[] = [];
 		const ignoredStream = await requestInspectionStreaming(testConnection, {}, { timeoutMs: 2_000, onDelta: (d) => ignoredDeltas.push(d) });
 		assert.deepEqual(ignoredDeltas.map((d) => d.type), ["content"]);
-		assert.deepEqual(ignoredStream.result, { memories: [], tree: [] });
+		assert.deepEqual(ignoredStream.result, { memories: [], tree: [], findings: [] });
 		// character cap enforced mid-stream
 		mockFetch(() => streamResponse(sseData({ choices: [{ delta: { content: "x".repeat(400_001) } }] })));
 		await assert.rejects(requestInspectionStreaming(testConnection, {}, { timeoutMs: 2_000 }), /exceeded the 400000 character limit/);
@@ -598,7 +693,7 @@ try {
 		};
 		mockFetch(() => streamResponse(longStream()));
 		const chatty = await requestInspectionStreaming(testConnection, {}, { timeoutMs: 2_000 });
-		assert.deepEqual(chatty.result, { memories: [], tree: [] }, "~5MB of envelope-heavy stream must assemble, not trip the wire cap");
+		assert.deepEqual(chatty.result, { memories: [], tree: [], findings: [] }, "~5MB of envelope-heavy stream must assemble, not trip the wire cap");
 		// runaway stream beyond the wire cap is still cut off
 		const runaway = fatChunk(" ").repeat(80_000) + "data: [DONE]\n\n";
 		mockFetch(() => streamResponse(runaway));
@@ -624,7 +719,7 @@ try {
 		recordInspectionStage(7, "manual", { stage: "request_sent", inspectionId: "run-1", model: "m", timeoutMs: 1_000 });
 		assert.deepEqual(seen, ["assembled", "request_sent"]);
 		assert.equal(getLiveInspection(7)?.running, true);
-		recordInspectionStage(7, "manual", { stage: "succeeded", inspectionId: "run-1", memories: 1, treeNodes: 2, elapsedMs: 5 });
+		recordInspectionStage(7, "manual", { stage: "succeeded", inspectionId: "run-1", memories: 1, treeNodes: 2, findings: 3, elapsedMs: 5 });
 		assert.equal(getLiveInspection(7)?.running, false);
 		unsubscribe();
 		// A late subscriber replays the whole finished timeline, other projects stay isolated

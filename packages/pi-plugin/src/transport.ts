@@ -7,6 +7,7 @@ import type {
 } from "@pi-kanban/shared";
 import { PROTOCOL_VERSION } from "@pi-kanban/shared";
 import { machineId, PLUGIN_VERSION } from "./config.js";
+import type { Notify } from "./notify.js";
 
 const OUTBOX_CAP = 500;
 const CREATED_ACK_TIMEOUT_MS = 5_000;
@@ -41,6 +42,7 @@ export class Transport {
 	constructor(
 		private readonly url: string,
 		private readonly agentToken: string,
+		private readonly log: Notify = () => {},
 	) {
 		// ws(s)://host:port/agent -> http(s)://host:port/agent/heartbeat
 		try {
@@ -109,7 +111,7 @@ export class Transport {
 		const now = Date.now();
 		if (this.connected) {
 			if (this.lastInboundAt && now - this.lastInboundAt > STALE_AFTER_MS) {
-				console.error("[pi-kanban] connection stale (no server traffic); reconnecting");
+				this.log("connection stale (no server traffic); reconnecting");
 				this.ws?.close();
 				return;
 			}
@@ -133,9 +135,9 @@ export class Transport {
 				body: JSON.stringify({ machineId: machineId(), sessionIds }),
 				signal: AbortSignal.timeout(HTTP_HEARTBEAT_TIMEOUT_MS),
 			});
-			if (!res.ok) console.error(`[pi-kanban] http heartbeat failed: HTTP ${res.status}`);
+			if (!res.ok) this.log(`http heartbeat failed: HTTP ${res.status}`);
 		} catch {
-			console.error("[pi-kanban] heartbeat transport unavailable");
+			// Heartbeats are best-effort; transient HTTP failures just skip one beat.
 		}
 	}
 
@@ -225,7 +227,7 @@ export class Transport {
 		try {
 			this.ws?.send(raw);
 		} catch {
-			console.error("[pi-kanban] socket send failed");
+			this.log("socket send failed");
 		}
 	}
 }
