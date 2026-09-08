@@ -55,6 +55,7 @@ export const INSPECTION_AGENT_TOOLS: InspectionAgentTool[] = [
 		properties: {
 			memories: { type: "array", maxItems: 20, items: { type: "object" } },
 			tree: { type: "array", maxItems: 40, items: { type: "object" } },
+			findings: { type: "array", maxItems: 10, items: { type: "object" } },
 		},
 		required: ["memories", "tree"],
 		additionalProperties: false,
@@ -115,7 +116,18 @@ async function getSessionTimeline(userId: string, projectId: number, args: Recor
 	const sessionId = requiredString(args.sessionId, 200);
 	const page = integer(args.page, 1, 1, 20);
 	const limit = integer(args.limit, 40, 1, MAX_TIMELINE_ITEMS);
-	const [session] = await db.select({ id: sessions.id, title: sessions.title, state: sessions.state }).from(sessions).where(and(
+	const [session] = await db.select({
+		id: sessions.id,
+		title: sessions.title,
+		state: sessions.state,
+		// Token aggregates let the model spot context re-derivation (input
+		// spikes, cache-read collapse) without reading message contents.
+		inputTokens: sessions.inputTokens,
+		cacheReadTokens: sessions.cacheReadTokens,
+		totalTokens: sessions.totalTokens,
+		contextTokens: sessions.contextTokens,
+		contextWindow: sessions.contextWindow,
+	}).from(sessions).where(and(
 		eq(sessions.id, sessionId),
 		eq(sessions.userId, userId),
 		eq(sessions.projectId, projectId),
@@ -125,7 +137,7 @@ async function getSessionTimeline(userId: string, projectId: number, args: Recor
 	const [turnRows, messageRows] = await Promise.all([
 		db.select({ position: turns.position, prompt: turns.prompt, state: turns.state, startedAt: turns.startedAt, endedAt: turns.endedAt })
 			.from(turns).where(eq(turns.sessionId, sessionId)).orderBy(desc(turns.position)).limit(limit).offset(offset),
-		db.select({ position: messages.position, turnPosition: messages.turnPosition, role: messages.role, excerpt: messages.excerpt, createdAt: messages.createdAt })
+		db.select({ position: messages.position, turnPosition: messages.turnPosition, role: messages.role, excerpt: messages.excerpt, usage: messages.usage, costUsd: messages.costUsd, createdAt: messages.createdAt })
 			.from(messages).where(eq(messages.sessionId, sessionId)).orderBy(desc(messages.position)).limit(limit).offset(offset),
 	]);
 	return {

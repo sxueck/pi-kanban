@@ -355,7 +355,31 @@ export interface ProjectMemoryDTO {
 	status: ProjectMemoryStatus;
 	moduleIds: string[];
 	evidence: Array<{ sessionId: string; turnPosition?: number }>;
+	/** How many inspections re-evidenced this memory (>=1). */
+	occurrenceCount: number;
 	createdAt: number;
+	/** When the latest inspection last re-evidenced this memory. */
+	lastSeenAt: number;
+}
+
+export type SessionFindingKind = "intent_drift" | "context_gap" | "tool_misuse" | "model_error";
+export type SessionFindingSeverity = "info" | "warning" | "error";
+
+/** Session-behavior finding extracted by an inspection (wish 2 output). */
+export interface SessionFindingDTO {
+	id: number;
+	kind: SessionFindingKind;
+	severity: SessionFindingSeverity;
+	/** One-line summary, <=300 chars. */
+	summary: string;
+	detail?: string;
+	/** Primary session the finding is about, when attributable to one. */
+	sessionId?: string;
+	turnPosition?: number;
+	evidence: Array<{ sessionId: string; turnPosition?: number }>;
+	occurrenceCount: number;
+	createdAt: number;
+	lastSeenAt: number;
 }
 
 export type ProjectTreeNodeKind = "project" | "module" | "file" | "decision" | "milestone" | "issue" | "evidence";
@@ -395,7 +419,7 @@ export type InspectionStageEvent =
 	| { stage: "assembled"; inspectionId: string; bytes: number; redactions: number; omitted: Record<string, number> }
 	| { stage: "request_sent"; inspectionId: string; model: string; timeoutMs: number }
 	| { stage: "tool_completed"; inspectionId: string; tool: string; round: number; status: "completed" | "rejected"; resultBytes: number; redactions: number }
-	| { stage: "succeeded"; inspectionId: string; memories: number; treeNodes: number; elapsedMs: number }
+	| { stage: "succeeded"; inspectionId: string; memories: number; treeNodes: number; findings: number; elapsedMs: number }
 	| { stage: "failed"; inspectionId: string; error: string; elapsedMs: number };
 
 /** One streamed model token batch, forwarded verbatim to the log panel. */
@@ -443,6 +467,7 @@ export interface ProjectWorkDTO {
 	project: { id: number; name: string; gitRemote?: string };
 	memories: ProjectMemoryDTO[];
 	tree: ProjectTreeNodeDTO[];
+	findings: SessionFindingDTO[];
 	coverage: ProjectCoverageDTO;
 	inspection: ProjectInspectionDTO;
 	snapshotUpdatedAt?: number;

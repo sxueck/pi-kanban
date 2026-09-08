@@ -261,7 +261,7 @@ function describeStage(stage: InspectionStageEvent, t: (key: MsgKey, params?: Re
 				n: stage.redactions,
 			});
 		case "succeeded":
-			return t("logs.stage.succeeded", { m: stage.memories, k: stage.treeNodes, s: Math.round(stage.elapsedMs / 1000) });
+			return t("logs.stage.succeeded", { m: stage.memories, k: stage.treeNodes, f: stage.findings, s: Math.round(stage.elapsedMs / 1000) });
 		case "failed":
 			return t("logs.stage.failed", { s: Math.round(stage.elapsedMs / 1000), error: stage.error.slice(0, 200) });
 	}

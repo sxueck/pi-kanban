@@ -4,6 +4,7 @@ import type { TodoSnapshotMessage } from "@pi-kanban/shared";
 import { agentToken, loadConfig } from "./config.js";
 import { collectProjectSnapshot, gitIdentity, SnapshotThrottle } from "./project-snapshot.js";
 import { Transport } from "./transport.js";
+import { registerNotify, type Notify } from "./notify.js";
 import { TurnState } from "./turn-state.js";
 import { runGate, type GateDeps } from "./gate.js";
 
@@ -15,12 +16,17 @@ export { runGate };
  * approval. Runtime deps are bundled; pi package is type-only.
  */
 export default function (pi: ExtensionAPI): void {
-	const config = loadConfig();
+	const notify = registerNotify(pi);
+	// Factory-time warnings are flushed on session_start: entries appended
+	// during extension load can land before the TUI transcript is watching.
+	const startupWarnings: Array<{ message: string; detail?: unknown }> = [];
+	const warn: Notify = (message, detail) => startupWarnings.push({ message, detail });
+	const config = loadConfig(warn);
 	const token = agentToken();
 	if (!token) {
-		console.error("[pi-kanban] no agent token configured — set the PI_KANBAN_TOKEN environment variable (e.g. in ~/.zshrc)");
+		warn("no agent token configured — set the PI_KANBAN_TOKEN environment variable (e.g. in ~/.zshrc)");
 	}
-	const transport = new Transport(config.server.url, token);
+	const transport = new Transport(config.server.url, token, notify);
 
 	let sessionId: string | null = null;
 	const snapshotThrottle = new SnapshotThrottle();
@@ -53,6 +59,7 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("session_start", async (event, ctx) => {
 		const id = ctx.sessionManager.getSessionId();
 		if (!id) return;
+		for (const { message, detail } of startupWarnings.splice(0)) notify(message, detail);
 		sessionId = id;
 		transport.connect();
 		startHeartbeat();
@@ -222,7 +229,7 @@ export default function (pi: ExtensionAPI): void {
 			if (changed || force) transport.send(snapshot);
 		} catch (error) {
 			snapshotThrottle.markRefreshed(now);
-			console.error("[pi-kanban] project snapshot failed:", error);
+			notify("project snapshot failed", error);
 		}
 	}
 
@@ -258,7 +265,7 @@ export default function (pi: ExtensionAPI): void {
 				return;
 			}
 		} catch {
-			console.error("[pi-kanban] todo snapshot unavailable");
+			notify("todo snapshot unavailable");
 		}
 	}
 }

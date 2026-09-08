@@ -6,6 +6,9 @@ import type {
 	ProjectMemoryKind,
 	ProjectMemoryStatus,
 	ProjectTreeNodeDTO,
+	SessionFindingDTO,
+	SessionFindingKind,
+	SessionFindingSeverity,
 } from "@pi-kanban/shared";
 import { computeNextInspectionAt } from "@pi-kanban/shared";
 import { publish } from "./bus.js";
@@ -15,6 +18,7 @@ import {
 	messages,
 	modelSettings,
 	projectAnalysisStates,
+	projectFindings,
 	projectInspections,
 	projectInspectionLogs,
 	projectMemories,
@@ -27,7 +31,7 @@ import {
 } from "./db/schema.js";
 import { decryptApiKey, readModelSettings, toInspectionSchedule } from "./model-settings.js";
 import { recordInspectionDelta, recordInspectionStage } from "./inspection-live.js";
-import { FULL_INSPECTION_TIMEOUT_MS, MAX_AGENT_ROUNDS, requestInspectionAgent, requestInspectionStreaming, ToolCapabilityError, type ModelInspectionResult } from "./model.js";
+import { FULL_INSPECTION_TIMEOUT_MS, MAX_AGENT_ROUNDS, requestInspectionAgent, requestInspectionStreaming, ToolCapabilityError, type ModelInspectionResult, type ModelMemoryCandidate } from "./model.js";
 import { executeInspectionAgentTool, INSPECTION_AGENT_TOOLS } from "./inspection-agent.js";
 import { buildStructureTree, mergeProjectTree } from "./project-tree.js";
 import { redactForModel, redactText, type Redactable } from "./redact.js";
@@ -43,6 +47,10 @@ export const INSPECTION_LOCK_TTL_MS = (MAX_AGENT_ROUNDS + 1) * FULL_INSPECTION_T
 const INSPECTION_LOCK_HEARTBEAT_MS = 60_000;
 /** Newest full transcripts kept per project; older runs keep only their metadata row. */
 export const RETAINED_INSPECTION_LOGS = 10;
+/** Session findings kept per project; older or one-off findings are pruned by lastSeenAt. */
+export const RETAINED_PROJECT_FINDINGS = 50;
+/** Evidence rows kept per memory row when merging across consolidations. */
+const MERGED_EVIDENCE_LIMIT = 16;
 /** Empty UUID rows are retained briefly so a newly opened live session can report its first turn. */
 export const EMPTY_SESSION_RETENTION_MS = Number(process.env.EMPTY_SESSION_RETENTION_MS ?? 60 * 60_000);
 const EMPTY_SESSION_ID = "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$";
@@ -157,10 +165,21 @@ export function splitInspectionBatches(sections: InspectionInputSections): Inspe
 	return batches;
 }
 
+export function dedupeInspectionFindings(findings: ModelInspectionResult["findings"]): ModelInspectionResult["findings"] {
+	const seen = new Set<string>();
+	return findings.filter((finding) => {
+		const key = findingRecurrenceKey(finding);
+		if (seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
+}
+
 export function mergeInspectionResults(results: ModelInspectionResult[]): ModelInspectionResult {
 	const seenMemories = new Set<string>();
 	const memories: ModelInspectionResult["memories"] = [];
 	const tree: ModelInspectionResult["tree"] = [];
+	const findings: ModelInspectionResult["findings"] = [];
 	for (const [batchIndex, result] of results.entries()) {
 		for (const memory of result.memories) {
 			const key = normalizeMemory(memory.content);
@@ -172,8 +191,62 @@ export function mergeInspectionResults(results: ModelInspectionResult[]): ModelI
 		for (const [nodeIndex, node] of result.tree.entries()) {
 			tree.push({ ...node, id: `insight:${batchIndex}:${nodeIndex}` });
 		}
+		for (const finding of result.findings) findings.push(finding);
 	}
-	return { memories, tree };
+	return { memories, tree, findings: dedupeInspectionFindings(findings) };
+}
+
+export interface MemoryConsolidationPlan {
+	/** Brand-new rows to insert as version 1. */
+	inserts: ModelMemoryCandidate[];
+	/** Active memories to bump occurrenceCount/lastSeenAt for. */
+	reinforces: Array<{ targetId: string; candidate: ModelMemoryCandidate }>;
+	/** Active memories whose corrected statement replaces them (same memoryKey, version+1). */
+	supersedes: Array<{ targetId: string; candidate: ModelMemoryCandidate }>;
+}
+
+/**
+ * Partitions model candidates against the active memory set. Candidates whose
+ * action+targetId names a real active memory consolidate it; repeated claims
+ * against the same active memory collapse to the first. A broken link or a
+ * missing one degrades to a plain insert unless the exact text already exists
+ * (dedup), mirroring the pre-consolidation behavior.
+ */
+export function planMemoryConsolidation(
+	candidates: ModelMemoryCandidate[],
+	existingActive: Array<{ memoryKey: string; content: string }>,
+): MemoryConsolidationPlan {
+	const activeIds = new Set(existingActive.map((row) => row.memoryKey));
+	const existingContents = new Set(existingActive.map((row) => normalizeMemory(row.content)));
+	const plan: MemoryConsolidationPlan = { inserts: [], reinforces: [], supersedes: [] };
+	const claimedTargets = new Set<string>();
+	for (const candidate of candidates) {
+		const requestedTargetId = candidate.action && candidate.targetId && activeIds.has(candidate.targetId)
+			? candidate.targetId
+			: undefined;
+		if (requestedTargetId && claimedTargets.has(requestedTargetId)) continue;
+		const targetId = requestedTargetId;
+		if (targetId && candidate.action === "reinforce") {
+			claimedTargets.add(targetId);
+			plan.reinforces.push({ targetId, candidate });
+			continue;
+		}
+		if (targetId && candidate.action === "supersede") {
+			claimedTargets.add(targetId);
+			plan.supersedes.push({ targetId, candidate });
+			continue;
+		}
+		if (!existingContents.has(normalizeMemory(candidate.content))) {
+			plan.inserts.push(candidate);
+			existingContents.add(normalizeMemory(candidate.content));
+		}
+	}
+	return plan;
+}
+
+/** Findings dedupe/merge key: same kind + subject session + normalized summary is one recurring finding. */
+export function findingRecurrenceKey(finding: { kind: string; sessionId?: string; summary: string }): string {
+	return `${finding.kind}|${finding.sessionId ?? ""}|${normalizeMemory(finding.summary)}`;
 }
 
 export async function ensureProjectAnalysisState(userId: string, projectId: number): Promise<void> {
@@ -426,6 +499,7 @@ async function executeInspection(
 			inspectionId: runId,
 			memories: redactedResult.value.memories.length,
 			treeNodes: redactedResult.value.tree.length,
+			findings: redactedResult.value.findings.length,
 			elapsedMs: Date.now() - startedMs,
 		});
 	} catch (error) {
@@ -464,7 +538,7 @@ async function buildInspectionSections(userId: string, projectId: number): Promi
 		db.select({ name: projects.name, gitRemote: projects.gitRemote }).from(projects).where(eq(projects.id, projectId)).limit(1),
 		db.select().from(projectSnapshots).where(and(eq(projectSnapshots.userId, userId), eq(projectSnapshots.projectId, projectId))).orderBy(desc(projectSnapshots.createdAt)).limit(1),
 		db.select({ id: sessions.id, title: sessions.title, branch: sessions.branch, state: sessions.state, lastActivityAt: sessions.lastActivityAt }).from(sessions).where(and(eq(sessions.userId, userId), eq(sessions.projectId, projectId))).orderBy(desc(sessions.lastActivityAt)).limit(SESSION_LIMIT),
-		db.select({ id: projectMemories.memoryKey, kind: projectMemories.kind, content: projectMemories.content, status: projectMemories.status }).from(projectMemories).where(and(eq(projectMemories.userId, userId), eq(projectMemories.projectId, projectId), isNull(projectMemories.supersededAt))).orderBy(desc(projectMemories.createdAt), desc(projectMemories.id)).limit(MEMORY_LIMIT),
+		db.select({ id: projectMemories.memoryKey, kind: projectMemories.kind, content: projectMemories.content, status: projectMemories.status, occurrenceCount: projectMemories.occurrenceCount }).from(projectMemories).where(and(eq(projectMemories.userId, userId), eq(projectMemories.projectId, projectId), isNull(projectMemories.supersededAt))).orderBy(desc(projectMemories.createdAt), desc(projectMemories.id)).limit(MEMORY_LIMIT),
 	]);
 	if (!projectRows[0]) throw new Error("project not found");
 	const sessionIds = sessionRows.map((session) => session.id);
@@ -506,10 +580,28 @@ async function persistInspectionResult(
 	claimedAt: Date,
 	log: { requestPayload: unknown; responseContent: string; reasoningContent?: string },
 ): Promise<void> {
-	const [projectRow, snapshotRow, existingRows] = await Promise.all([
+	const [projectRow, snapshotRow, existingRows, existingFindingRows] = await Promise.all([
 		db.select({ name: projects.name }).from(projects).where(eq(projects.id, projectId)).limit(1),
 		db.select({ files: projectSnapshots.files }).from(projectSnapshots).where(and(eq(projectSnapshots.userId, userId), eq(projectSnapshots.projectId, projectId))).orderBy(desc(projectSnapshots.createdAt)).limit(1),
-		db.select({ content: projectMemories.content }).from(projectMemories).where(and(eq(projectMemories.userId, userId), eq(projectMemories.projectId, projectId), isNull(projectMemories.supersededAt))),
+		db.select({
+			id: projectMemories.id,
+			memoryKey: projectMemories.memoryKey,
+			version: projectMemories.version,
+			content: projectMemories.content,
+			status: projectMemories.status,
+			moduleIds: projectMemories.moduleIds,
+			evidence: projectMemories.evidence,
+			occurrenceCount: projectMemories.occurrenceCount,
+		}).from(projectMemories).where(and(eq(projectMemories.userId, userId), eq(projectMemories.projectId, projectId), isNull(projectMemories.supersededAt))),
+		db.select({
+			id: projectFindings.id,
+			kind: projectFindings.kind,
+			severity: projectFindings.severity,
+			summary: projectFindings.summary,
+			detail: projectFindings.detail,
+			sessionId: projectFindings.sessionId,
+			evidence: projectFindings.evidence,
+		}).from(projectFindings).where(and(eq(projectFindings.userId, userId), eq(projectFindings.projectId, projectId))),
 	]);
 	const sessionRows = await db.select({ id: sessions.id }).from(sessions).where(and(eq(sessions.userId, userId), eq(sessions.projectId, projectId)));
 	const allowedSessions = new Set(sessionRows.map((row) => row.id));
@@ -519,13 +611,18 @@ async function persistInspectionResult(
 	const allowedTurns = new Set(turnRows.map((row) => `${row.sessionId}:${row.position}`));
 	const validEvidence = (entry: { sessionId: string; turnPosition?: number }) =>
 		allowedSessions.has(entry.sessionId) && (entry.turnPosition === undefined || allowedTurns.has(`${entry.sessionId}:${entry.turnPosition}`));
-	const existing = new Set(existingRows.map((row) => normalizeMemory(row.content)));
 	const files = asSnapshotFiles(snapshotRow[0]?.files);
 	const structure = buildStructureTree(files, projectRow[0]?.name ?? "Project");
 	const structureIds = new Set(structure.map((node) => node.id));
 	const memories = retainStructureModuleIds(result.memories, structureIds);
-	const candidates = memories.filter((memory) => !existing.has(normalizeMemory(memory.content)));
+	const plan = planMemoryConsolidation(memories, existingRows.map((row) => ({ memoryKey: row.memoryKey, content: row.content })));
+	const byTargetId = new Map(existingRows.map((row) => [row.memoryKey, row]));
 	const tree = mergeProjectTree(structure, result.tree.filter((node) => !node.sessionId || validEvidence({ sessionId: node.sessionId, turnPosition: node.turnPosition })));
+	// Findings about a session that is gone (or never existed) are dropped;
+	// cross-session findings carry no sessionId and always pass.
+	const findings = dedupeInspectionFindings(
+		result.findings.filter((finding) => !finding.sessionId || allowedSessions.has(finding.sessionId)),
+	);
 	const now = new Date();
 	await db.transaction(async (tx) => {
 		// Fence all result writes, not only the unlock, against a replaced claim.
@@ -533,8 +630,8 @@ async function persistInspectionResult(
 			.where(and(eq(projectAnalysisStates.userId, userId), eq(projectAnalysisStates.projectId, projectId), eq(projectAnalysisStates.lockedAt, claimedAt)))
 			.for("update").limit(1);
 		if (!owner) throw new Error("inspection claim expired; result discarded");
-		if (candidates.length > 0) {
-			await tx.insert(projectMemories).values(candidates.map((memory) => ({
+		if (plan.inserts.length > 0) {
+			await tx.insert(projectMemories).values(plan.inserts.map((memory) => ({
 				memoryKey: randomUUID(),
 				userId,
 				projectId,
@@ -546,7 +643,68 @@ async function persistInspectionResult(
 				moduleIds: memory.moduleIds,
 				evidence: memory.evidence.filter(validEvidence),
 				sourceInspectionId: runId,
+				lastSeenInspectionId: runId,
 			})));
+		}
+		for (const { targetId, candidate } of plan.reinforces) {
+			const row = byTargetId.get(targetId);
+			if (!row) continue;
+			await tx.update(projectMemories).set({
+				occurrenceCount: row.occurrenceCount + 1,
+				lastSeenAt: now,
+				lastSeenInspectionId: runId,
+				moduleIds: mergeModuleIds(row.moduleIds, candidate.moduleIds),
+				evidence: mergeEvidenceRows(row.evidence, candidate.evidence.filter(validEvidence)),
+			}).where(and(eq(projectMemories.id, row.id), isNull(projectMemories.supersededAt)));
+		}
+		for (const { targetId, candidate } of plan.supersedes) {
+			const row = byTargetId.get(targetId);
+			if (!row) continue;
+			const [superseded] = await tx.update(projectMemories).set({ supersededAt: now })
+				.where(and(eq(projectMemories.id, row.id), isNull(projectMemories.supersededAt)))
+				.returning({ id: projectMemories.id });
+			if (!superseded) continue;
+			// The corrected statement carries the old row's user disposition
+			// forward (pinned stays pinned); an archived memory is not resurrected.
+			await tx.insert(projectMemories).values({
+				memoryKey: row.memoryKey,
+				userId,
+				projectId,
+				version: row.version + 1,
+				kind: candidate.kind,
+				content: candidate.content,
+				status: supersedeStatus(row.status),
+				moduleIds: candidate.moduleIds,
+				evidence: mergeEvidenceRows(row.evidence, candidate.evidence.filter(validEvidence)),
+				occurrenceCount: row.occurrenceCount + 1,
+				sourceInspectionId: runId,
+				lastSeenInspectionId: runId,
+			});
+		}
+		const findingIndex = new Map(existingFindingRows.map((row) => [findingRecurrenceKey({ ...row, sessionId: row.sessionId ?? undefined }), row]));
+		for (const finding of findings) {
+			const evidence = finding.evidence.filter(validEvidence);
+			const existingFinding = findingIndex.get(findingRecurrenceKey(finding));
+			if (existingFinding) {
+				await tx.update(projectFindings).set({
+					occurrenceCount: sql`${projectFindings.occurrenceCount} + 1`,
+					lastSeenAt: now,
+					...(finding.detail ? { detail: finding.detail, severity: finding.severity } : {}),
+					evidence: mergeEvidenceRows(existingFinding.evidence, evidence),
+				}).where(eq(projectFindings.id, existingFinding.id));
+				continue;
+			}
+			await tx.insert(projectFindings).values({
+				userId,
+				projectId,
+				kind: finding.kind,
+				severity: finding.severity,
+				summary: finding.summary,
+				detail: finding.detail,
+				sessionId: finding.sessionId,
+				evidence,
+				sourceInspectionId: runId,
+			});
 		}
 		// Guarded by the claim timestamp: if this run's lock expired and a newer
 		// run claimed the project, this completion must not overwrite the new
@@ -572,7 +730,43 @@ async function persistInspectionResult(
 		}).onConflictDoNothing({ target: projectInspectionLogs.inspectionId });
 	});
 	await pruneInspectionLogs(userId, projectId);
+	await pruneProjectFindings(userId, projectId);
 	publish({ type: "project_update", userId, projectId });
+}
+
+/** Keeps only the newest RETAINED_PROJECT_FINDINGS findings per project, ordered by recency of last sighting. */
+async function pruneProjectFindings(userId: string, projectId: number): Promise<void> {
+	await db.execute(sql`
+		DELETE FROM project_findings
+		WHERE id IN (
+			SELECT id FROM project_findings
+			WHERE user_id = ${userId} AND project_id = ${projectId}
+			ORDER BY last_seen_at DESC
+			OFFSET ${RETAINED_PROJECT_FINDINGS}
+		)
+	`);
+}
+
+/** A superseding inspection keeps the user's disposition; archived stays archived, a fresh candidate graduates to confirmed. */
+function supersedeStatus(status: string): string {
+	if (status === "archived") return "archived";
+	if (status === "candidate") return "confirmed";
+	return status;
+}
+
+function mergeModuleIds(current: unknown, incoming: string[]): string[] {
+	return [...new Set([...asModuleIds(current), ...incoming])].slice(0, 3);
+}
+
+function mergeEvidenceRows(current: unknown, incoming: Array<{ sessionId: string; turnPosition?: number }>): Array<{ sessionId: string; turnPosition?: number }> {
+	const merged = [...asEvidence(current), ...incoming];
+	const seen = new Set<string>();
+	return merged.filter((entry) => {
+		const key = `${entry.sessionId}:${entry.turnPosition ?? ""}`;
+		if (seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	}).slice(0, MERGED_EVIDENCE_LIMIT);
 }
 
 /** Keeps only the newest RETAINED_INSPECTION_LOGS transcripts per project; run metadata rows are untouched. */
@@ -686,8 +880,65 @@ export function toMemoryDto(row: typeof projectMemories.$inferSelect): ProjectMe
 		status: row.status as ProjectMemoryStatus,
 		moduleIds: asModuleIds(row.moduleIds),
 		evidence: asEvidence(row.evidence),
+		occurrenceCount: row.occurrenceCount,
 		createdAt: row.createdAt.getTime(),
+		lastSeenAt: row.lastSeenAt.getTime(),
 	};
+}
+
+export type ReferenceRulesMemory = Pick<ProjectMemoryDTO, "kind" | "content" | "status" | "moduleIds" | "occurrenceCount">;
+
+export function toFindingDto(row: typeof projectFindings.$inferSelect): SessionFindingDTO {
+	return {
+		id: row.id,
+		kind: row.kind as SessionFindingKind,
+		severity: row.severity as SessionFindingSeverity,
+		summary: row.summary,
+		detail: row.detail ?? undefined,
+		sessionId: row.sessionId ?? undefined,
+		evidence: asEvidence(row.evidence),
+		occurrenceCount: row.occurrenceCount,
+		createdAt: row.createdAt.getTime(),
+		lastSeenAt: row.lastSeenAt.getTime(),
+	};
+}
+
+/** Reference-rule export: confirmed/pinned memories grouped by module. Never a replacement for an existing AGENTS.md. */
+export function renderReferenceRulesMarkdown(
+	projectName: string,
+	memories: ReferenceRulesMemory[],
+	tree: ProjectTreeNodeDTO[],
+): string {
+	const labels = new Map(tree.map((node) => [node.id, node.label]));
+	const groups = new Map<string, ReferenceRulesMemory[]>();
+	for (const memory of memories) {
+		if (memory.status !== "confirmed" && memory.status !== "pinned") continue;
+		const moduleId = memory.moduleIds.find((id) => labels.has(id));
+		const key = moduleId ?? "";
+		const bucket = groups.get(key) ?? [];
+		bucket.push(memory);
+		groups.set(key, bucket);
+	}
+	const lines = [
+		`# ${projectName}: suggested project rules`,
+		"",
+		"> Reference only. Review each suggestion and manually merge relevant rules into the appropriate existing AGENTS.md file.",
+		"> Do not replace an existing AGENTS.md with this file. Existing files may contain scoped, security, testing, and manually maintained rules that inspections cannot reproduce.",
+		"",
+		"Generated by pi-kanban from confirmed and pinned inspection memories.",
+		"",
+	];
+	const sortedGroups = [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
+	for (const [moduleId, bucket] of sortedGroups) {
+		const label = moduleId ? labels.get(moduleId) ?? moduleId : "General";
+		lines.push(`## ${label}`);
+		for (const memory of bucket) {
+			const occurrences = memory.occurrenceCount > 1 ? ` (seen ${memory.occurrenceCount}×)` : "";
+			lines.push(`- [${memory.kind}] ${memory.content}${occurrences}`);
+		}
+		lines.push("");
+	}
+	return lines.join("\n");
 }
 
 export function redactInspectionResult(result: ModelInspectionResult): { value: ModelInspectionResult; count: number } {
@@ -702,6 +953,7 @@ export function redactInspectionResult(result: ModelInspectionResult): { value: 
 		value: {
 			memories: result.memories.map((memory) => ({ ...memory, content: redact(memory.content) ?? "" })),
 			tree: result.tree.map((node) => ({ ...node, label: redact(node.label) ?? "", detail: redact(node.detail) })),
+			findings: result.findings.map((finding) => ({ ...finding, summary: redact(finding.summary) ?? "", detail: redact(finding.detail) })),
 		},
 		count,
 	};

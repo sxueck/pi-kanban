@@ -352,6 +352,12 @@ export const projectMemories = pgTable(
 		status: text("status").notNull().default("candidate"),
 		evidence: jsonb("evidence").notNull(),
 		moduleIds: jsonb("module_ids").notNull().default([]),
+		// Cross-inspection consolidation: how many inspections re-evidenced this
+		// memory, and when/which one last did. Reinforce bumps the count in
+		// place; supersede writes a new row that carries the count forward.
+		occurrenceCount: integer("occurrence_count").notNull().default(1),
+		lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+		lastSeenInspectionId: uuid("last_seen_inspection_id").references(() => projectInspections.id, { onDelete: "set null" }),
 		sourceInspectionId: uuid("source_inspection_id").references(() => projectInspections.id, { onDelete: "set null" }),
 		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 		supersededAt: timestamp("superseded_at", { withTimezone: true }),
@@ -359,5 +365,33 @@ export const projectMemories = pgTable(
 	(t) => [
 		unique("uq_project_memories_key_version").on(t.memoryKey, t.version),
 		index("idx_project_memories_active").on(t.userId, t.projectId, t.supersededAt),
+	],
+);
+
+/** Session-behavior findings (intent drift, context gaps, error patterns) extracted by inspections. */
+export const projectFindings = pgTable(
+	"project_findings",
+	{
+		id: serial("id").primaryKey(),
+		userId: uuid("user_id")
+			.notNull()
+			.references(() => users.id, { onDelete: "cascade" }),
+		projectId: integer("project_id")
+			.notNull()
+			.references(() => projects.id, { onDelete: "cascade" }),
+		kind: text("kind").notNull(), // intent_drift | context_gap | tool_misuse | model_error
+		severity: text("severity").notNull(), // info | warning | error
+		summary: text("summary").notNull(),
+		detail: text("detail"),
+		sessionId: text("session_id"),
+		evidence: jsonb("evidence").notNull().default([]),
+		occurrenceCount: integer("occurrence_count").notNull().default(1),
+		lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+		sourceInspectionId: uuid("source_inspection_id").references(() => projectInspections.id, { onDelete: "set null" }),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(t) => [
+		index("idx_project_findings_project").on(t.userId, t.projectId, t.createdAt),
+		index("idx_project_findings_recurrence").on(t.userId, t.projectId, t.kind),
 	],
 );

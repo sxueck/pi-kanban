@@ -21,6 +21,9 @@ import type {
 	ProjectWorkDTO,
 	RecentSessionDTO,
 	SessionDetailDTO,
+	SessionFindingDTO,
+	SessionFindingKind,
+	SessionFindingSeverity,
 	SessionState,
 	TodoProgress,
 } from "@pi-kanban/shared";
@@ -30,6 +33,7 @@ import {
 	approvals,
 	messages,
 	projectAnalysisStates,
+	projectFindings,
 	projectInspections,
 	projectInspectionLogs,
 	projectMemories,
@@ -73,7 +77,10 @@ import {
 	ensureProjectAnalysisState,
 	INSPECTION_LOCK_TTL_MS,
 	queueProjectInspection,
+	renderReferenceRulesMarkdown,
 	RETAINED_INSPECTION_LOGS,
+	RETAINED_PROJECT_FINDINGS,
+	toFindingDto,
 	toMemoryDto,
 } from "./inspector.js";
 import { getLiveInspection, subscribeInspectionLive, type InspectionLiveEvent } from "./inspection-live.js";
@@ -566,8 +573,9 @@ api.get("/api/projects/:id/work", async (c) => {
 		.limit(1);
 	if (!owned) return c.json({ error: "project not found" }, 404);
 	await ensureProjectAnalysisState(userId, projectId);
-	const [memoryRows, stateRows, snapshotRows, readToolRows, settings] = await Promise.all([
+	const [memoryRows, findingRows, stateRows, snapshotRows, readToolRows, settings] = await Promise.all([
 		db.select().from(projectMemories).where(and(eq(projectMemories.userId, userId), eq(projectMemories.projectId, projectId), isNull(projectMemories.supersededAt))).orderBy(desc(projectMemories.createdAt)),
+		db.select().from(projectFindings).where(and(eq(projectFindings.userId, userId), eq(projectFindings.projectId, projectId))).orderBy(desc(projectFindings.lastSeenAt), desc(projectFindings.id)).limit(RETAINED_PROJECT_FINDINGS),
 		db.select().from(projectAnalysisStates).where(and(eq(projectAnalysisStates.userId, userId), eq(projectAnalysisStates.projectId, projectId))).limit(1),
 		db.select({ createdAt: projectSnapshots.createdAt, files: projectSnapshots.files }).from(projectSnapshots).where(and(eq(projectSnapshots.userId, userId), eq(projectSnapshots.projectId, projectId))).orderBy(desc(projectSnapshots.createdAt)).limit(1),
 		db.select({ cwd: sessions.cwd, toolName: toolCalls.toolName, input: toolCalls.input }).from(toolCalls)
@@ -588,6 +596,7 @@ api.get("/api/projects/:id/work", async (c) => {
 		project: { id: owned.id, name: owned.name, gitRemote: owned.gitRemote ?? undefined },
 		memories: memoryRows.map(toMemoryDto),
 		tree: readCoverage.tree,
+		findings: findingRows.map(toFindingDto),
 		coverage: {
 			totalFiles: readCoverage.totalFiles,
 			readFiles: readCoverage.readFiles,
@@ -764,6 +773,29 @@ api.get("/api/projects/:id/inspection-log/stream", (c) => {
 	});
 });
 
+api.get("/api/projects/:id/memories/reference-rules", async (c) => {
+	const projectId = Number(c.req.param("id"));
+	if (!Number.isInteger(projectId)) return c.json({ error: "bad project id" }, 400);
+	const userId = currentUser(c).id;
+	const [owned] = await db
+		.select({ id: projects.id, name: projects.name })
+		.from(projects)
+		.innerJoin(sessions, and(eq(sessions.projectId, projects.id), eq(sessions.userId, userId)))
+		.where(eq(projects.id, projectId))
+		.limit(1);
+	if (!owned) return c.json({ error: "project not found" }, 404);
+	const [memoryRows, stateRows] = await Promise.all([
+		db.select().from(projectMemories).where(and(eq(projectMemories.userId, userId), eq(projectMemories.projectId, projectId), isNull(projectMemories.supersededAt))).orderBy(desc(projectMemories.occurrenceCount), desc(projectMemories.lastSeenAt)),
+		db.select({ latestTree: projectAnalysisStates.latestTree }).from(projectAnalysisStates).where(and(eq(projectAnalysisStates.userId, userId), eq(projectAnalysisStates.projectId, projectId))).limit(1),
+	]);
+	const tree = asProjectTree(stateRows[0]?.latestTree);
+	const markdown = renderReferenceRulesMarkdown(owned.name, memoryRows.map(toMemoryDto), tree);
+	return c.body(markdown, 200, {
+		"content-type": "text/markdown; charset=utf-8",
+		"content-disposition": `attachment; filename="PROJECT-RULE-SUGGESTIONS-${encodeURIComponent(owned.name)}.md"`,
+	});
+});
+
 api.post("/api/projects/:id/memories/:memoryId/status", async (c) => {
 	const projectId = Number(c.req.param("id"));
 	if (!Number.isInteger(projectId)) return c.json({ error: "bad project id" }, 400);
@@ -799,6 +831,9 @@ api.post("/api/projects/:id/memories/:memoryId/status", async (c) => {
 				moduleIds: current.moduleIds,
 				evidence: current.evidence,
 				sourceInspectionId: current.sourceInspectionId,
+				occurrenceCount: current.occurrenceCount,
+				lastSeenAt: current.lastSeenAt,
+				lastSeenInspectionId: current.lastSeenInspectionId,
 			}).returning();
 			return next;
 		});

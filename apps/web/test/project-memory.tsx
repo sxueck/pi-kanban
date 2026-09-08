@@ -1,20 +1,23 @@
 import assert from "node:assert/strict";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
-import { InspectionCard, MemoriesCard, ModuleDetails } from "../src/views/History.js";
+import { InspectionCard, MemoriesCard, ModuleDetails, FindingsCard } from "../src/views/History.js";
 import { appendLiveDelta, InspectionLogPanel, LiveStreamBlocks } from "../src/views/InspectionLogs.js";
 import type { ProjectMemoryDTO } from "@pi-kanban/shared";
 
 const memories: ProjectMemoryDTO[] = [
-	{ id: "new", version: 1, kind: "fact", content: "New memory", status: "candidate", moduleIds: [], evidence: [], createdAt: 200 },
-	{ id: "pin", version: 1, kind: "fact", content: "Pinned memory", status: "pinned", moduleIds: [], evidence: [], createdAt: 100 },
-	{ id: "dec", version: 1, kind: "decision", content: "Decision memory", status: "candidate", moduleIds: [], evidence: [], createdAt: 50 },
+	{ id: "new", version: 1, kind: "fact", content: "New memory", status: "candidate", moduleIds: [], evidence: [], occurrenceCount: 1, createdAt: 200, lastSeenAt: 200 },
+	{ id: "pin", version: 1, kind: "fact", content: "Pinned memory", status: "pinned", moduleIds: [], evidence: [], occurrenceCount: 4, createdAt: 100, lastSeenAt: 800 },
+	{ id: "dec", version: 1, kind: "decision", content: "Decision memory", status: "candidate", moduleIds: [], evidence: [], occurrenceCount: 1, createdAt: 50, lastSeenAt: 50 },
 ];
 const renderMemories = (filter: "all" | "candidate", pending = new Set<string>(), insights: Parameters<typeof MemoriesCard>[0]["insights"] = []) => renderToStaticMarkup(
-	<MemoryRouter><MemoriesCard memories={memories} insights={insights} pending={pending} filter={filter} onFilter={() => {}} onStatus={() => {}} /></MemoryRouter>,
+	<MemoryRouter><MemoriesCard memories={memories} insights={insights} projectId={1} pending={pending} filter={filter} onFilter={() => {}} onStatus={() => {}} /></MemoryRouter>,
 );
 const all = renderMemories("all");
 assert.ok(all.indexOf("Pinned memory") < all.indexOf("New memory"));
+assert.ok(all.includes("seen 4×"), "consolidated memories surface their occurrence count");
+assert.ok(all.includes("Download reference rules"), "memory export is labeled as reference material");
+assert.ok(!all.includes("Export AGENTS.md"), "the export must not imply it replaces AGENTS.md");
 assert.equal(memories[0].id, "new", "sorting must not mutate the fetched resource");
 // kind grouping: decisions render ahead of facts, each under its group header
 assert.ok(all.indexOf("Decision memory") < all.indexOf("Pinned memory"), "decision group must precede fact group");
@@ -31,6 +34,21 @@ assert.ok(withInsights.includes("Inspection insights"));
 assert.ok(withInsights.includes("Runner alias drift"));
 assert.ok(withInsights.includes("severity-warning"));
 assert.ok(withInsights.indexOf("Pinned memory") < withInsights.indexOf("Runner alias drift"), "insight group follows the memory groups");
+// session findings card groups by kind with severity and recurrence
+const findingsHtml = renderToStaticMarkup(
+	<MemoryRouter><FindingsCard findings={[
+		{ id: 1, kind: "context_gap", severity: "warning", summary: "Omitted file paths; model re-asked", sessionId: "s1", evidence: [], occurrenceCount: 2, createdAt: 100, lastSeenAt: 500 },
+		{ id: 2, kind: "model_error", severity: "error", summary: "Provider 503 streak", evidence: [], occurrenceCount: 1, createdAt: 300, lastSeenAt: 300 },
+	]}/></MemoryRouter>,
+);
+assert.ok(findingsHtml.includes("Session insights"));
+assert.ok(findingsHtml.includes("context gap"));
+assert.ok(findingsHtml.includes("model error"));
+assert.ok(findingsHtml.includes("severity-error"));
+assert.ok(findingsHtml.includes("2×"), "recurring findings show their count");
+const emptyFindings = renderToStaticMarkup(<MemoryRouter><FindingsCard findings={[]} /></MemoryRouter>);
+assert.ok(emptyFindings.includes("No session insights yet"));
+
 const inspection = { enabled: true, intervalMinutes: 60, running: false, lastError: "previous-timeout" };
 const idle = renderToStaticMarkup(<InspectionCard inspection={inspection} busy={false} onInspect={() => {}} onLogs={() => {}} />);
 assert.ok(idle.includes("previous-timeout"));
@@ -68,8 +86,8 @@ const moduleDetails = renderToStaticMarkup(
 		node={{ id: "path:apps/web", parentId: "project", kind: "module", label: "web" }}
 		insights={[{ id: "i1", kind: "decision", label: "Use mergeProjectTree", sessionId: "s1" }]}
 		memories={[
-			{ id: "linked", version: 1, kind: "fact", content: "Linked memory", status: "candidate", moduleIds: ["path:apps/web"], evidence: [{ sessionId: "s1", turnPosition: 2 }], createdAt: 300 },
-			{ id: "other", version: 1, kind: "fact", content: "Other memory", status: "candidate", moduleIds: ["path:apps/server"], evidence: [{ sessionId: "s2" }], createdAt: 250 },
+			{ id: "linked", version: 1, kind: "fact", content: "Linked memory", status: "candidate", moduleIds: ["path:apps/web"], evidence: [{ sessionId: "s1", turnPosition: 2 }], occurrenceCount: 1, createdAt: 300, lastSeenAt: 300 },
+			{ id: "other", version: 1, kind: "fact", content: "Other memory", status: "candidate", moduleIds: ["path:apps/server"], evidence: [{ sessionId: "s2" }], occurrenceCount: 1, createdAt: 250, lastSeenAt: 250 },
 		]}
 		sessions={[
 			{ id: "s1", title: "Web session", state: "idle", turnCount: 1, totalCostUsd: 0, startedAt: 100 },

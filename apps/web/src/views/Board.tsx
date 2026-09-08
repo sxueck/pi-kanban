@@ -105,6 +105,20 @@ export function Board() {
 				{SECTION_ORDER.filter(({ state }) => stateFilter === "all" || state === stateFilter).map(({ state }) => (
 					<BoardSection key={state} state={state} list={visibleByState.get(state) ?? []} />
 				))}
+				{(recentFiltered.length > 0 || !filtersActive) && (
+					<section className="board-section recent-section">
+						<header>
+							<h2>{t("board.recent")}</h2>
+						</header>
+						{(recentFiltered.length ?? 0) === 0 ? (
+							<p className="muted">{t("board.noRecent")}</p>
+						) : (
+							<div className="recent-cards">
+								{recentFiltered.map((session) => <RecentSessionCard key={session.id} session={session} />)}
+							</div>
+						)}
+					</section>
+				)}
 				{filtersActive && total === 0 && recentFiltered.length === 0 && (
 					<div className="empty">
 						<h2>{t("board.noMatch")}</h2>
@@ -122,20 +136,6 @@ export function Board() {
 			<aside className="board-rail">
 				<UsageHeatmap />
 				<DailyCostChart />
-				{(recentFiltered.length > 0 || !filtersActive) && (
-					<section className="board-section recent-section">
-						<header>
-							<h2>{t("board.recent")}</h2>
-						</header>
-						{(recentFiltered.length ?? 0) === 0 ? (
-							<p className="muted">{t("board.noRecent")}</p>
-						) : (
-							<div className="recent-cards">
-								{recentFiltered.map((session) => <RecentSessionCard key={session.id} session={session} />)}
-							</div>
-						)}
-					</section>
-				)}
 			</aside>
 		</div>
 	);
