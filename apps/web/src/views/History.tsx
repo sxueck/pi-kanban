@@ -25,8 +25,8 @@ const EMPTY_PROJECT_COVERAGE: ProjectWorkDTO["coverage"] = {
 };
 
 const STRUCTURE_KINDS = new Set(["project", "module"]);
+const PROJECT_TREE_KINDS = new Set(["project", "module", "file"]);
 
-/** Walk the parent chain: insight nodes belong to their module ancestor, if any. */
 function insightModuleId(node: ProjectTreeNodeDTO, byId: Map<string, ProjectTreeNodeDTO>): string | undefined {
 	let cursor = node.parentId;
 	while (cursor) {
@@ -36,6 +36,25 @@ function insightModuleId(node: ProjectTreeNodeDTO, byId: Map<string, ProjectTree
 		cursor = parent.parentId;
 	}
 	return undefined;
+}
+
+export function partitionProjectTree(treeNodes: ProjectTreeNodeDTO[]) {
+	const nodeById = new Map(treeNodes.map((node) => [node.id, node]));
+	const structureNodes = treeNodes.filter((node) => STRUCTURE_KINDS.has(node.kind));
+	const moduleInsights = new Map<string, ProjectTreeNodeDTO[]>();
+	const rootInsights: ProjectTreeNodeDTO[] = [];
+	for (const node of treeNodes) {
+		if (PROJECT_TREE_KINDS.has(node.kind)) continue;
+		const moduleId = insightModuleId(node, nodeById);
+		if (!moduleId) {
+			rootInsights.push(node);
+			continue;
+		}
+		const list = moduleInsights.get(moduleId) ?? [];
+		list.push(node);
+		moduleInsights.set(moduleId, list);
+	}
+	return { structureNodes, moduleInsights, rootInsights };
 }
 
 export function History() {
@@ -101,21 +120,7 @@ export function ProjectSessions() {
 	// The tree card shows structure only; inspection insights surface in module
 	// details, or in the memories card when they are not linked to any module.
 	const treeNodes = work?.tree ?? [];
-	const nodeById = new Map(treeNodes.map((node) => [node.id, node]));
-	const structureNodes = treeNodes.filter((node) => STRUCTURE_KINDS.has(node.kind));
-	const moduleInsights = new Map<string, ProjectTreeNodeDTO[]>();
-	const rootInsights: ProjectTreeNodeDTO[] = [];
-	for (const node of treeNodes) {
-		if (STRUCTURE_KINDS.has(node.kind)) continue;
-		const moduleId = insightModuleId(node, nodeById);
-		if (!moduleId) {
-			rootInsights.push(node);
-			continue;
-		}
-		const list = moduleInsights.get(moduleId) ?? [];
-		list.push(node);
-		moduleInsights.set(moduleId, list);
-	}
+	const { structureNodes, moduleInsights, rootInsights } = partitionProjectTree(treeNodes);
 
 	async function setStatus(memoryId: string, status: ProjectMemoryStatus) {
 		if (!id || pendingRequests.current.has(memoryId)) return;
@@ -625,10 +630,6 @@ function TreeCard({ nodes, coverage, selectedNodeId, onSelect }: {
 				<div>
 					<h2>{t("work.tree")}</h2>
 					<p className="tree-coverage-summary">
-						{coverage.totalFiles > 0
-							? t("work.coverage.files", { read: coverage.readFiles, total: coverage.totalFiles })
-							: t("work.coverage.none")}
-						<span>·</span>
 						{t("work.coverage.memories", { n: coverage.highConfidenceMemories })}
 					</p>
 				</div>
@@ -678,7 +679,6 @@ function TreeLevel({ byParent, parentId, depth = 0, selectedNodeId, onSelect }: 
 									<span className="work-label">{node.label}</span>
 								)}
 							</summary>
-							{node.coverage && node.coverage.totalFiles > 0 && <span className="work-coverage">{t("work.coverage.files", { read: node.coverage.readFiles, total: node.coverage.totalFiles })}</span>}
 							{node.fileCount != null && <p className="work-detail">{t("work.tree.files", { n: node.fileCount })}</p>}
 							{node.detail && <p className="work-detail">{node.detail}</p>}
 							<TreeLevel byParent={byParent} parentId={node.id} depth={depth + 1} selectedNodeId={selectedNodeId} onSelect={onSelect} />

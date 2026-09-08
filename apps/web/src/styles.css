@@ -22,12 +22,12 @@
 	--accent-soft: #d8f3e9;
 	--assistant: #7442d3;
 	--assistant-bg: #f1ecfb;
-	--running: #10b981;
-	--running-bg: #d9f4e8;
+	--running: #16846f;
+	--running-bg: #dcefe8;
 	--waiting: #b47f2c;
 	--waiting-bg: #faf1da;
-	--idle: #5f7d72;
-	--idle-bg: #e9f0ec;
+	--idle: #bd7534;
+	--idle-bg: #fff0df;
 	--offline: #85938e;
 	--offline-bg: #edf0f0;
 	--error: #e0524f;
@@ -64,12 +64,12 @@
 	--accent-soft: rgba(39, 201, 154, 0.16);
 	--assistant: #b69af0;
 	--assistant-bg: rgba(122, 84, 200, 0.2);
-	--running: #2fcf9d;
-	--running-bg: rgba(47, 207, 157, 0.14);
+	--running: #55b5a0;
+	--running-bg: rgba(85, 181, 160, 0.16);
 	--waiting: #d9a55e;
 	--waiting-bg: rgba(217, 165, 94, 0.15);
-	--idle: #93b3a8;
-	--idle-bg: rgba(147, 179, 168, 0.14);
+	--idle: #e8ae72;
+	--idle-bg: rgba(232, 174, 114, 0.16);
 	--offline: #71827b;
 	--offline-bg: rgba(255, 255, 255, 0.07);
 	--error: #f0716d;
@@ -371,11 +371,11 @@ h3 {
 	0%,
 	100% {
 		transform: scale(1);
-		box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.45);
+		box-shadow: 0 0 0 0 rgba(22, 132, 111, 0.45);
 	}
 	50% {
 		transform: scale(1.15);
-		box-shadow: 0 0 0 5px rgba(16, 185, 129, 0);
+		box-shadow: 0 0 0 5px rgba(22, 132, 111, 0);
 	}
 }
 
@@ -682,20 +682,20 @@ font-size: 12px;
 }
 
 .recent-section {
-	padding: 14px 16px 16px;
-	background: var(--bg-card);
-	border-radius: var(--radius);
-	box-shadow: var(--shadow-card);
+	padding: 0;
+	background: none;
+	border-radius: 0;
+	box-shadow: none;
 }
 
 .recent-section > header {
-	padding-bottom: 10px;
+	padding-bottom: 6px;
 }
 
 .recent-cards {
 	display: grid;
 	grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-	gap: 8px;
+	gap: 12px;
 }
 
 .recent-card {
@@ -703,17 +703,20 @@ font-size: 12px;
 	min-width: 0;
 	flex-direction: column;
 	gap: 4px;
-	padding: 10px 12px;
-	border: 1px solid var(--border);
-	border-radius: var(--radius-sm);
-	background: var(--bg-subtle);
+	padding: 16px 18px;
+	border-radius: var(--radius);
+	background: var(--bg-card);
+	box-shadow: var(--shadow-card);
 	color: var(--fg);
 	text-decoration: none;
+	transition:
+		box-shadow 0.15s ease,
+		transform 0.15s ease;
 }
 
 .recent-card:hover {
-	border-color: var(--border-strong);
-	box-shadow: var(--shadow-card);
+	box-shadow: var(--shadow-hover);
+	transform: translateY(-1px);
 }
 
 .recent-state {
@@ -3000,8 +3003,15 @@ details[open] > summary .tree-twisty {
 
 .inspection-actions {
 	display: flex;
-	gap: 8px;
 	flex-wrap: wrap;
+	gap: 10px;
+}
+
+.inspection-actions button {
+	min-height: 40px;
+	padding: 8px 16px;
+	font-size: 14px;
+	line-height: 20px;
 }
 
 .inspection-actions .secondary {

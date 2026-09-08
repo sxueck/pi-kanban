@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
-import { InspectionCard, MemoriesCard, ModuleDetails, FindingsCard } from "../src/views/History.js";
+import { InspectionCard, MemoriesCard, ModuleDetails, FindingsCard, partitionProjectTree } from "../src/views/History.js";
 import { appendLiveDelta, InspectionLogPanel, LiveStreamBlocks } from "../src/views/InspectionLogs.js";
 import type { ProjectMemoryDTO } from "@pi-kanban/shared";
 
@@ -34,6 +34,13 @@ assert.ok(withInsights.includes("Inspection insights"));
 assert.ok(withInsights.includes("Runner alias drift"));
 assert.ok(withInsights.includes("severity-warning"));
 assert.ok(withInsights.indexOf("Pinned memory") < withInsights.indexOf("Runner alias drift"), "insight group follows the memory groups");
+const partitionedTree = partitionProjectTree([
+	{ id: "project", kind: "project", label: "pi-kanban" },
+	{ id: "file:README.md", parentId: "project", kind: "file", label: "README.md" },
+	{ id: "i1", parentId: "project", kind: "issue", label: "Runner alias drift" },
+]);
+assert.deepEqual(partitionedTree.rootInsights.map((node) => node.id), ["i1"], "project memories must not duplicate file-tree nodes");
+
 // session findings card groups by kind with severity and recurrence
 const findingsHtml = renderToStaticMarkup(
 	<MemoryRouter><FindingsCard findings={[
