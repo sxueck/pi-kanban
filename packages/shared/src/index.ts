@@ -162,6 +162,12 @@ export interface HeartbeatMessage {
 	timestamp: number;
 }
 
+/** Plugin asks for the memory digest of the project this session belongs to. */
+export interface MemoryFetchMessage {
+	type: "memory_fetch";
+	sessionId: string;
+}
+
 export type UpstreamMessage =
 	| HelloMessage
 	| SessionStartMessage
@@ -176,7 +182,8 @@ export type UpstreamMessage =
 	| TodoSnapshotMessage
 	| ApprovalRequestMessage
 	| ApprovalLocalResolutionMessage
-	| HeartbeatMessage;
+	| HeartbeatMessage
+	| MemoryFetchMessage;
 
 // ---------------------------------------------------------------------------
 // Downstream: server -> plugin
@@ -208,6 +215,41 @@ export interface HeartbeatAckMessage {
 	serverTime: number;
 }
 
+/** One injectable project memory; content was server-redacted before persistence. */
+export interface MemoryDigestEntry {
+	kind: ProjectMemoryKind;
+	content: string;
+	status: ProjectMemoryStatus;
+	occurrenceCount: number;
+	lastSeenAt: number;
+}
+
+export interface MemoryDigestFinding {
+	kind: SessionFindingKind;
+	severity: SessionFindingSeverity;
+	summary: string;
+	occurrenceCount: number;
+	lastSeenAt: number;
+}
+
+/**
+ * Bounded project-memory payload injected into pi sessions. Sent as the reply
+ * to memory_fetch (sessionId echoes the requester) and pushed to machines with
+ * live sessions after each successful inspection (sessionId omitted; plugins
+ * match pushes by projectId learned from an earlier reply).
+ */
+export interface MemoryDigestMessage {
+	type: "memory_digest";
+	projectId: number;
+	projectName: string;
+	sessionId?: string;
+	/** Short content hash (excludes generatedAt); equal revisions skip cache rewrites. */
+	revision: string;
+	generatedAt: number;
+	memories: MemoryDigestEntry[];
+	findings: MemoryDigestFinding[];
+}
+
 export interface ServerErrorMessage {
 	type: "error";
 	message: string;
@@ -218,6 +260,7 @@ export type DownstreamMessage =
 	| ApprovalCreatedMessage
 	| ApprovalDecisionMessage
 	| HeartbeatAckMessage
+	| MemoryDigestMessage
 	| ServerErrorMessage;
 
 // ---------------------------------------------------------------------------
@@ -407,7 +450,12 @@ export interface ProjectCoverageDTO {
 
 export interface ProjectInspectionDTO {
 	enabled: boolean;
-	intervalMinutes: number;
+	/** Daily start time (minutes after local midnight), when enabled. */
+	startMinute: number;
+	/** Admin excluded this project from scheduled inspections. */
+	excluded: boolean;
+	/** Sessions of this project; below MIN_INSPECTION_SESSIONS scheduling pauses. */
+	sessionCount: number;
 	running: boolean;
 	lastRunAt?: number;
 	nextRunAt?: number;
@@ -473,46 +521,37 @@ export interface ProjectWorkDTO {
 	snapshotUpdatedAt?: number;
 }
 
+/** Scheduled inspections skip projects with fewer live sessions than this. */
+export const MIN_INSPECTION_SESSIONS = 10;
+
 /**
- * Cron-like inspection schedule: the inspection repeats every intervalMinutes
- * inside a per-day time window, on the selected weekdays. Times are minutes
- * after local midnight; windowEndMinute is inclusive (23:59 spans the full day).
+ * Daily inspection schedule: one run per allowed day, starting at startMinute
+ * (minutes after local midnight, machine's local time zone).
  */
 export interface InspectionSchedule {
-	intervalMinutes: number;
-	windowStartMinute: number;
-	windowEndMinute: number;
-	/** Days of week the window is active, 0 = Sunday … 6 = Saturday (Date.getDay). */
+	startMinute: number;
+	/** Days of week the run is active, 0 = Sunday … 6 = Saturday (Date.getDay). */
 	weekdays: number[];
 }
 
 /**
- * Earliest inspection slot at or after `from`: on each allowed day, slots
- * restart at windowStart and repeat every intervalMinutes until windowEnd,
- * evaluated in the machine's local time zone. `from` itself is a valid result
- * (a run finishing exactly on a slot boundary does not wait another cycle).
+ * Next inspection slot strictly after `from`: the start time on the first
+ * allowed day that has not yet passed it, evaluated in the machine's local
+ * time zone. One run per day — a finished or failed run waits until the next
+ * allowed day.
  */
 export function computeNextInspectionAt(schedule: InspectionSchedule, from: Date): Date {
-	const intervalMs = schedule.intervalMinutes * 60_000;
 	const allowed = new Set(schedule.weekdays);
 	for (let dayOffset = 0; dayOffset <= 8; dayOffset++) {
 		// 8 local-day iterations always cover at least one allowed weekday,
 		// even across DST transitions that shift the calendar day length.
 		const day = new Date(from.getFullYear(), from.getMonth(), from.getDate() + dayOffset);
 		if (!allowed.has(day.getDay())) continue;
-		const windowStart = minuteOfDay(day, schedule.windowStartMinute);
-		// windowEndMinute is inclusive; compare against the exclusive minute after
-		// it so a slot picked up by a late sweep at :00:30 still counts as in-window.
-		const windowEnd = minuteOfDay(day, schedule.windowEndMinute + 1);
-		if (from.getTime() >= windowEnd.getTime()) continue;
-		const steps = from.getTime() <= windowStart.getTime()
-			? 0
-			: Math.ceil((from.getTime() - windowStart.getTime()) / intervalMs);
-		const slot = new Date(windowStart.getTime() + steps * intervalMs);
-		if (slot.getTime() < windowEnd.getTime()) return slot;
+		const slot = minuteOfDay(day, schedule.startMinute);
+		if (slot.getTime() > from.getTime()) return slot;
 	}
 	// Unreachable when weekdays is non-empty (validated at the settings boundary).
-	return new Date(from.getTime() + intervalMs);
+	return new Date(from.getTime() + 86_400_000);
 }
 
 function minuteOfDay(midnight: Date, minutes: number): Date {
@@ -529,10 +568,10 @@ export interface ModelSettingsDTO {
 	baseUrl: string;
 	model: string;
 	enabled: boolean;
-	intervalMinutes: number;
-	windowStartMinute: number;
-	windowEndMinute: number;
+	startMinute: number;
 	weekdays: number[];
+	/** Projects excluded from scheduled inspections (all others are included). */
+	excludedProjectIds: number[];
 	hasApiKey: boolean;
 	updatedAt?: number;
 }
@@ -541,12 +580,18 @@ export interface ModelSettingsInput {
 	baseUrl: string;
 	model: string;
 	enabled: boolean;
-	intervalMinutes: number;
-	windowStartMinute: number;
-	windowEndMinute: number;
+	startMinute: number;
 	weekdays: number[];
+	excludedProjectIds: number[];
 	/** Omit to keep the current key; an empty value clears it. */
 	apiKey?: string;
+}
+
+/** Admin-facing project row for the inspection exclusion picker. */
+export interface InspectionProjectDTO {
+	id: number;
+	name: string;
+	sessionCount: number;
 }
 
 export interface HistorySessionDTO {

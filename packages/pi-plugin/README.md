@@ -74,6 +74,18 @@ path such as `/kanban/agent` behind a reverse proxy is kept as-is).
   TCP timeout). The server also pings WS clients and reaps dead ones within
   ~60s; the dashboard marks a session `offline` after 90s of total heartbeat
   silence.
+- **Project memory injection** (inspection → runtime loop): at `session_start`
+  the plugin sends `memory_fetch`; the server replies with a `memory_digest` —
+  the project's confirmed/pinned memories and recurring findings, server-side
+  redacted before persistence, capped at 24 + 8 items / 8 KB. The block is
+  appended to each turn's system prompt (≤ 4 KB, advisory wording). Digests
+  are cached at `~/.pi/agent/pi-kanban-memories.json` (7-day TTL) so injection
+  also works offline or across restarts; pushes after each successful
+  inspection refresh live sessions without waiting for the next session.
+- **`/kanban-status`**: prints a metrics snapshot into the transcript (display
+  only, never sent to the LLM) — connection state and outbox backlog, per-turn
+  injection counts, the active digest (revision, age, injected memory/finding
+  breakdown), injection block size vs budget, and every cached project digest.
 - Transport is offline-tolerant: queued outbox (500 msgs), exponential reconnect;
   pending approval waits are released (allowed) on disconnect.
 

@@ -55,34 +55,32 @@ try {
 		baseUrl: "https://model.example.test/v1/",
 		model: "test-model",
 		enabled: true,
-		intervalMinutes: 15,
-		windowStartMinute: 540,
-		windowEndMinute: 1080,
+		startMinute: 540,
 		weekdays: [5, 4, 3, 2, 1],
+		excludedProjectIds: [3, 1, 2],
 	}), {
 		baseUrl: "https://model.example.test/v1",
 		model: "test-model",
 		enabled: true,
-		intervalMinutes: 15,
-		windowStartMinute: 540,
-		windowEndMinute: 1080,
+		startMinute: 540,
 		weekdays: [1, 2, 3, 4, 5],
+		excludedProjectIds: [3, 1, 2],
 	});
-	const validSchedule = { windowStartMinute: 0, windowEndMinute: 1439, weekdays: [0, 1, 2, 3, 4, 5, 6] as number[] };
-	assert.throws(() => validateModelSettings({ baseUrl: "file:///tmp/model", model: "x", enabled: false, intervalMinutes: 15, ...validSchedule }));
+	const validSchedule = { startMinute: 0, weekdays: [0, 1, 2, 3, 4, 5, 6] as number[] };
+	assert.throws(() => validateModelSettings({ baseUrl: "file:///tmp/model", model: "x", enabled: false, ...validSchedule, excludedProjectIds: [] }));
 	// http with any host is allowed (e.g. service names on a private network)
-	assert.equal(validateModelSettings({ baseUrl: "http://model.example.test/v1", model: "x", enabled: false, intervalMinutes: 15, ...validSchedule }).baseUrl, "http://model.example.test/v1");
-	assert.throws(() => validateModelSettings({ baseUrl: "https://user:pass@example.test/v1", model: "x", enabled: false, intervalMinutes: 15, ...validSchedule }));
-	assert.throws(() => validateModelSettings({ baseUrl: "https://example.test", model: "x", enabled: false, intervalMinutes: 1, ...validSchedule }));
-	assert.throws(() => validateModelSettings({ baseUrl: "https://example.test", model: "x", enabled: false, intervalMinutes: 45, ...validSchedule }));
-	// schedule window/weekday validation
-	assert.throws(() => validateModelSettings({ baseUrl: "https://example.test", model: "x", enabled: false, intervalMinutes: 15, windowStartMinute: 720, windowEndMinute: 720, weekdays: [1] }));
-	assert.throws(() => validateModelSettings({ baseUrl: "https://example.test", model: "x", enabled: false, intervalMinutes: 15, windowStartMinute: 1440, windowEndMinute: 1439, weekdays: [1] }));
-	assert.throws(() => validateModelSettings({ baseUrl: "https://example.test", model: "x", enabled: false, intervalMinutes: 15, windowStartMinute: 0, windowEndMinute: 1440, weekdays: [1] }));
-	assert.throws(() => validateModelSettings({ baseUrl: "https://example.test", model: "x", enabled: false, intervalMinutes: 15, windowStartMinute: 0, windowEndMinute: 1439, weekdays: [] }));
-	assert.throws(() => validateModelSettings({ baseUrl: "https://example.test", model: "x", enabled: false, intervalMinutes: 15, windowStartMinute: 0, windowEndMinute: 1439, weekdays: [7] }));
-	assert.throws(() => validateModelSettings({ baseUrl: "https://example.test", model: "x", enabled: false, intervalMinutes: 15, windowStartMinute: 0, windowEndMinute: 1439, weekdays: [1, 1] }));
-	assert.equal(validateModelSettings({ baseUrl: "http://localhost:11434/v1", model: "x", enabled: false, intervalMinutes: 15, ...validSchedule }).baseUrl, "http://localhost:11434/v1");
+	assert.equal(validateModelSettings({ baseUrl: "http://model.example.test/v1", model: "x", enabled: false, ...validSchedule, excludedProjectIds: [] }).baseUrl, "http://model.example.test/v1");
+	assert.throws(() => validateModelSettings({ baseUrl: "https://user:pass@example.test/v1", model: "x", enabled: false, ...validSchedule, excludedProjectIds: [] }));
+	// schedule time/weekday/exclusion validation
+	assert.throws(() => validateModelSettings({ baseUrl: "https://example.test", model: "x", enabled: false, startMinute: 1440, weekdays: [1], excludedProjectIds: [] }));
+	assert.throws(() => validateModelSettings({ baseUrl: "https://example.test", model: "x", enabled: false, startMinute: -1, weekdays: [1], excludedProjectIds: [] }));
+	assert.throws(() => validateModelSettings({ baseUrl: "https://example.test", model: "x", enabled: false, startMinute: 540, weekdays: [], excludedProjectIds: [] }));
+	assert.throws(() => validateModelSettings({ baseUrl: "https://example.test", model: "x", enabled: false, startMinute: 540, weekdays: [7], excludedProjectIds: [] }));
+	assert.throws(() => validateModelSettings({ baseUrl: "https://example.test", model: "x", enabled: false, startMinute: 540, weekdays: [1, 1], excludedProjectIds: [] }));
+	assert.throws(() => validateModelSettings({ baseUrl: "https://example.test", model: "x", enabled: false, ...validSchedule, excludedProjectIds: [1, 1] }));
+	assert.throws(() => validateModelSettings({ baseUrl: "https://example.test", model: "x", enabled: false, ...validSchedule, excludedProjectIds: [0] }));
+	assert.throws(() => validateModelSettings({ baseUrl: "https://example.test", model: "x", enabled: false, ...validSchedule, excludedProjectIds: [1.5] }));
+	assert.equal(validateModelSettings({ baseUrl: "http://localhost:11434/v1", model: "x", enabled: false, ...validSchedule, excludedProjectIds: [] }).baseUrl, "http://localhost:11434/v1");
 
 	const settingsRow = {
 		id: 1,
@@ -90,10 +88,9 @@ try {
 		model: "test-model",
 		apiKeyCipher: encrypted,
 		enabled: false,
-		inspectionIntervalMinutes: 30,
-		inspectionWindowStart: 540,
-		inspectionWindowEnd: 1080,
+		inspectionStartMinute: 540,
 		inspectionWeekdays: 62, // bits 1-5 = Mon-Fri
+		excludedProjectIds: [7],
 		updatedAt: new Date(),
 	};
 	assert.equal(toInspectionConnection(undefined), null);
@@ -104,7 +101,7 @@ try {
 		baseUrl: "https://model.example.test/v1",
 		model: "test-model",
 		apiKeyCipher: encrypted,
-		schedule: { intervalMinutes: 30, windowStartMinute: 540, windowEndMinute: 1080, weekdays: [1, 2, 3, 4, 5] },
+		schedule: { startMinute: 540, weekdays: [1, 2, 3, 4, 5] },
 	});
 
 	// split request budgets: slow full inspection, fast connection test, and a
@@ -245,9 +242,7 @@ try {
 	// All dates are constructed in local time because the schedule itself is
 	// defined in the machine's local time zone.
 	const workweek = (over: Partial<InspectionSchedule> = {}): InspectionSchedule => ({
-		intervalMinutes: 60,
-		windowStartMinute: 0,
-		windowEndMinute: 1439,
+		startMinute: 540,
 		weekdays: [0, 1, 2, 3, 4, 5, 6],
 		...over,
 	});
@@ -256,9 +251,8 @@ try {
 	assert.deepEqual(planInspectionSchedule(undefined, { enabled: false, schedule: workweek() }, plannedNow), { type: "none" });
 	assert.deepEqual(planInspectionSchedule({ enabled: false, schedule: workweek() }, { enabled: false, schedule: workweek() }, plannedNow), { type: "none" });
 	// only the enable transition schedules projects: idle states run at the
-	// schedule's next slot (12:00 is itself a slot for an all-day hourly window)
-	assert.deepEqual(planInspectionSchedule(undefined, { enabled: true, schedule: workweek() }, plannedNow), { type: "reschedule-idle", nextAt: new Date(2026, 0, 1, 12, 0) });
-	assert.deepEqual(planInspectionSchedule({ enabled: false, schedule: workweek() }, { enabled: true, schedule: workweek({ intervalMinutes: 1440 }) }, plannedNow), { type: "reschedule-idle", nextAt: new Date(2026, 0, 2, 0, 0) });
+	// schedule's next daily slot (Friday 09:00)
+	assert.deepEqual(planInspectionSchedule(undefined, { enabled: true, schedule: workweek() }, plannedNow), { type: "reschedule-idle", nextAt: new Date(2026, 0, 2, 9, 0) });
 	// re-saving identical settings must not reset schedules; weekday order alone is not a change
 	assert.deepEqual(planInspectionSchedule({ enabled: true, schedule: workweek() }, { enabled: true, schedule: workweek() }, plannedNow), { type: "none" });
 	assert.deepEqual(
@@ -266,27 +260,27 @@ try {
 		{ type: "none" },
 	);
 	// schedule change while enabled: idle states restart from the new schedule
+	// (12:00 is still before 18:00, so the run lands on the same day)
 	assert.deepEqual(
-		planInspectionSchedule({ enabled: true, schedule: workweek() }, { enabled: true, schedule: workweek({ intervalMinutes: 1440 }) }, plannedNow),
-		{ type: "reschedule-idle", nextAt: new Date(2026, 0, 2, 0, 0) },
+		planInspectionSchedule({ enabled: true, schedule: workweek() }, { enabled: true, schedule: workweek({ startMinute: 1080 }) }, plannedNow),
+		{ type: "reschedule-idle", nextAt: new Date(2026, 0, 1, 18, 0) },
 	);
 	// disabling stops future scheduled runs but leaves any live lock alone
 	assert.deepEqual(planInspectionSchedule({ enabled: true, schedule: workweek() }, { enabled: false, schedule: workweek() }, plannedNow), { type: "clear-schedule" });
 
-	// --- cron-like slot computation --------------------------------------------
-	// 2026-01-01 is a Thursday; window 09:00–18:00 every 30 min, Mon–Fri only.
-	const office = workweek({ intervalMinutes: 30, windowStartMinute: 540, windowEndMinute: 1080, weekdays: [1, 2, 3, 4, 5] });
+	// --- daily slot computation ------------------------------------------------
+	// 2026-01-01 is a Thursday; one run per day at 09:00, Mon-Fri only.
+	const office = workweek({ startMinute: 540, weekdays: [1, 2, 3, 4, 5] });
 	assert.equal(computeNextInspectionAt(office, new Date(2026, 0, 1, 8, 59)).getTime(), new Date(2026, 0, 1, 9, 0).getTime());
-	assert.equal(computeNextInspectionAt(office, new Date(2026, 0, 1, 10, 7)).getTime(), new Date(2026, 0, 1, 10, 30).getTime());
-	// slots are aligned to the window start, and `from` itself counts
-	assert.equal(computeNextInspectionAt(office, new Date(2026, 0, 1, 10, 30)).getTime(), new Date(2026, 0, 1, 10, 30).getTime());
-	// windowEnd is inclusive: 18:00 is still a slot, 18:00:30 is not
-	assert.equal(computeNextInspectionAt(office, new Date(2026, 0, 1, 17, 45)).getTime(), new Date(2026, 0, 1, 18, 0).getTime());
-	assert.equal(computeNextInspectionAt(office, new Date(2026, 0, 1, 18, 0, 30)).getTime(), new Date(2026, 0, 2, 9, 0).getTime());
+	// one run per day: a slot already reached (even exactly) waits for the next day
+	assert.equal(computeNextInspectionAt(office, new Date(2026, 0, 1, 9, 0)).getTime(), new Date(2026, 0, 2, 9, 0).getTime());
+	assert.equal(computeNextInspectionAt(office, new Date(2026, 0, 1, 10, 7)).getTime(), new Date(2026, 0, 2, 9, 0).getTime());
+	// Friday after the slot rolls over the weekend to Monday
+	assert.equal(computeNextInspectionAt(office, new Date(2026, 0, 2, 17, 45)).getTime(), new Date(2026, 0, 5, 9, 0).getTime());
 	// weekend rolls to the next allowed weekday
 	assert.equal(computeNextInspectionAt(office, new Date(2026, 0, 3, 12, 0)).getTime(), new Date(2026, 0, 5, 9, 0).getTime());
-	// daily interval with an all-day window advances exactly one day
-	assert.equal(computeNextInspectionAt(workweek({ intervalMinutes: 1440 }), new Date(2026, 0, 1, 10, 0)).getTime(), new Date(2026, 0, 2, 0, 0).getTime());
+	// every-day schedule advances exactly one day
+	assert.equal(computeNextInspectionAt(workweek(), new Date(2026, 0, 1, 10, 0)).getTime(), new Date(2026, 0, 2, 9, 0).getTime());
 
 	assert.ok(SYSTEM_PROMPT.includes("the model's actions or conclusions departed from the user's stated goal"));
 	assert.ok(SYSTEM_PROMPT.includes("do not flag the user for intentionally changing the goal"));

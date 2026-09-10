@@ -7,7 +7,7 @@ Cloud web kanban for [pi](https://github.com/earendil-works/pi-coding-agent) cod
 - **Live progress** — running / waiting / idle / offline sessions with turn,
   message, tool-call, todo and cost telemetry.
 - **Session history** — finished sessions grouped by git project.
-- **Project memory** — PII-redacted model inspections produce reviewable, versioned memories plus a project structure and issue tree.
+- **Project memory** — PII-redacted model inspections produce reviewable, versioned memories plus a project structure and issue tree. Confirmed memories and recurring findings are pushed back to the plugin (`memory_fetch` on session start, a digest push after each inspection) and injected as a bounded advisory block into future session prompts, closing the loop.
 - **Multi-user isolation** — local username/password accounts, per-user Agent Tokens, and private session, approval, and history views.
 
 A pi **extension** is injected locally and pushes the session stream upstream
@@ -26,7 +26,7 @@ project_snapshot     │  /agent           inspect → memories/tree ├──�
 tool_execution_*    │  /agent           REST /api/*             ├──◀── SSE  History / Detail
 tool_call ─(gate)───┤                   SSE /api/events         │      (Vite React SPA)
 heartbeat 30s       │◀─ approval_decision ───────────────────────┘
-(HTTP + WS)         │
+(HTTP + WS)         │◀─ memory_digest (post-inspection push → system prompt)
 ```
 
 - **Gate** (`tool_call`, blockable): local-first — TUI `ctx.ui.confirm` up to

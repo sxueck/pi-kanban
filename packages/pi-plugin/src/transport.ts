@@ -3,6 +3,7 @@ import type {
 	ApprovalRequestMessage,
 	DownstreamMessage,
 	HelloMessage,
+	MemoryDigestMessage,
 	UpstreamMessage,
 } from "@pi-kanban/shared";
 import { PROTOCOL_VERSION } from "@pi-kanban/shared";
@@ -21,6 +22,8 @@ export type DecisionVerdict = "approved" | "denied" | "offline";
 
 type DecisionListener = (verdict: DecisionVerdict) => void;
 
+type DigestListener = (digest: MemoryDigestMessage) => void;
+
 /**
  * Resilient WebSocket client on Node's native WebSocket (Node >= 22).
  * - Fire-and-forget upstream messages queue in an outbox while disconnected.
@@ -38,6 +41,7 @@ export class Transport {
 	private readonly heartbeatUrl: string;
 	private decisionListeners = new Map<string, Set<DecisionListener>>();
 	private createdWaiters = new Map<string, (approvalId: string) => void>();
+	private digestListeners = new Set<DigestListener>();
 
 	constructor(
 		private readonly url: string,
@@ -89,6 +93,11 @@ export class Transport {
 
 	get connected(): boolean {
 		return this.ws?.readyState === WebSocket.OPEN;
+	}
+
+	/** Upstream messages queued while disconnected — a nonzero value means the server is missing data. */
+	get queued(): number {
+		return this.outbox.length;
 	}
 
 	send(msg: UpstreamMessage): void {
@@ -168,6 +177,12 @@ export class Transport {
 		};
 	}
 
+	/** Subscribes to project memory digests; returns an unsubscribe function. */
+	onDigest(listener: DigestListener): () => void {
+		this.digestListeners.add(listener);
+		return () => this.digestListeners.delete(listener);
+	}
+
 	private handleClose(ws: WebSocket): void {
 		if (this.ws !== ws) return;
 		this.ws = null;
@@ -200,6 +215,14 @@ export class Transport {
 		} else if (msg.type === "approval_decision") {
 			const set = this.decisionListeners.get(msg.approvalId);
 			if (set) for (const listener of set) listener(msg.decision);
+		} else if (msg.type === "memory_digest") {
+			for (const listener of [...this.digestListeners]) {
+				try {
+					listener(msg);
+				} catch {
+					// A broken listener must not kill the socket or the other listeners.
+				}
+			}
 		}
 	}
 

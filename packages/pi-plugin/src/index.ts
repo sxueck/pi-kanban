@@ -1,8 +1,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { truncate } from "@pi-kanban/shared";
-import type { TodoSnapshotMessage } from "@pi-kanban/shared";
-import { agentToken, loadConfig } from "./config.js";
+import type { MemoryDigestMessage, TodoSnapshotMessage } from "@pi-kanban/shared";
+import { agentDir, agentToken, loadConfig } from "./config.js";
 import { collectProjectSnapshot, gitIdentity, SnapshotThrottle } from "./project-snapshot.js";
+import { cacheStats, loadCachedDigest, MEMORY_PROMPT_BUDGET_BYTES, projectKey, renderMemoryPrompt, saveDigest } from "./memory-cache.js";
+import { formatStatus, type KanbanStatusSnapshot } from "./status.js";
 import { Transport } from "./transport.js";
 import { registerNotify, type Notify } from "./notify.js";
 import { TurnState } from "./turn-state.js";
@@ -45,6 +48,61 @@ export default function (pi: ExtensionAPI): void {
 		getTurnPosition: () => turns.current,
 	};
 
+	// --- project memory digest (inspection → runtime loop) --------------------
+
+	let activeProjectId: number | null = null;
+	let activeKey = "";
+	let activeDigest: MemoryDigestMessage | null = null;
+	let activePromptBlock: string | undefined;
+	let totalTurns = 0;
+	let injectedTurns = 0;
+
+	function applyDigest(digest: MemoryDigestMessage): void {
+		activeProjectId = digest.projectId;
+		activeDigest = digest;
+		activePromptBlock = renderMemoryPrompt(digest, MEMORY_PROMPT_BUDGET_BYTES);
+		saveDigest(agentDir(), activeKey, digest);
+	}
+
+	transport.onDigest((digest) => {
+		// A fetch reply echoes our sessionId; a post-inspection push carries none
+		// and only counts for the project this session already fetched.
+		if (digest.sessionId != null ? digest.sessionId !== sessionId : digest.projectId !== activeProjectId) return;
+		applyDigest(digest);
+	});
+
+	// --- /kanban-status: metrics snapshot, display-only transcript entry -------
+
+	const STATUS_ENTRY_TYPE = "pi-kanban-status";
+	pi.registerEntryRenderer(STATUS_ENTRY_TYPE, (entry, _options, theme) => {
+		const text = (entry.data as { text?: string }).text ?? "";
+		return new Text(theme.fg("dim", text));
+	});
+	pi.registerCommand("kanban-status", {
+		description: "Show pi-kanban connection, memory digest and injection metrics",
+		handler: async (_args, ctx) => {
+			const snapshot: KanbanStatusSnapshot = {
+				serverUrl: config.server.url,
+				connected: transport.connected,
+				queued: transport.queued,
+				sessionId,
+				totalTurns,
+				injectedTurns,
+				digest: activeDigest,
+				promptBlockBytes: activePromptBlock ? Buffer.byteLength(activePromptBlock) : 0,
+				promptBudgetBytes: MEMORY_PROMPT_BUDGET_BYTES,
+				cacheEntries: cacheStats(agentDir()),
+				now: Date.now(),
+			};
+			try {
+				pi.appendEntry(STATUS_ENTRY_TYPE, { text: formatStatus(snapshot) });
+			} catch {
+				// Pre-session or non-interactive modes have no transcript to append to.
+				ctx.ui.notify(formatStatus(snapshot), "info");
+			}
+		},
+	});
+
 	let heartbeat: ReturnType<typeof setInterval> | null = null;
 	const startHeartbeat = () => {
 		if (heartbeat) return;
@@ -67,6 +125,18 @@ export default function (pi: ExtensionAPI): void {
 		turns.reset();
 		lastTodoHash = "";
 		const identity = await gitIdentity(ctx.cwd);
+		// Cached digest injects immediately (offline included); the fetch below
+		// refreshes it once the server answers. activeKey scopes cache reads/writes.
+		activeKey = projectKey(identity.gitRemote, ctx.cwd);
+		activeProjectId = null;
+		totalTurns = 0;
+		injectedTurns = 0;
+		const cachedDigest = loadCachedDigest(agentDir(), activeKey);
+		if (cachedDigest) applyDigest(cachedDigest);
+		else {
+			activeDigest = null;
+			activePromptBlock = undefined;
+		}
 		transport.send({
 			type: "session_start",
 			sessionId: id,
@@ -77,6 +147,7 @@ export default function (pi: ExtensionAPI): void {
 			reason: event.reason,
 			startedAt: Date.now(),
 		});
+		transport.send({ type: "memory_fetch", sessionId: id });
 		snapshotThrottle.reset();
 		await refreshProjectSnapshot(ctx.cwd, identity, true);
 	});
@@ -117,6 +188,14 @@ export default function (pi: ExtensionAPI): void {
 			prompt: lastPrompt,
 			startedAt: Date.now(),
 		});
+		totalTurns++;
+		// Stable per digest revision, so the provider prompt cache only invalidates
+		// when an inspection actually changed the memories.
+		if (activePromptBlock) {
+			injectedTurns++;
+			return { systemPrompt: `${event.systemPrompt}\n\n${activePromptBlock}` };
+		}
+		return undefined;
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {

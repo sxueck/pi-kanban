@@ -56,7 +56,7 @@ assert.ok(findingsHtml.includes("2×"), "recurring findings show their count");
 const emptyFindings = renderToStaticMarkup(<MemoryRouter><FindingsCard findings={[]} /></MemoryRouter>);
 assert.ok(emptyFindings.includes("No session insights yet"));
 
-const inspection = { enabled: true, intervalMinutes: 60, running: false, lastError: "previous-timeout" };
+const inspection = { enabled: true, startMinute: 540, excluded: false, sessionCount: 42, running: false, lastError: "previous-timeout" };
 const idle = renderToStaticMarkup(<InspectionCard inspection={inspection} busy={false} onInspect={() => {}} onLogs={() => {}} />);
 assert.ok(idle.includes("previous-timeout"));
 assert.ok(idle.includes("Inspection logs"), "the log entry point must render");
@@ -66,6 +66,11 @@ assert.ok(running.includes('disabled=""'));
 const starting = renderToStaticMarkup(<InspectionCard inspection={inspection} busy onInspect={() => {}} onLogs={() => {}} />);
 assert.ok(!starting.includes("previous-timeout"));
 assert.ok(starting.includes("inspection running"));
+// a project below the session floor or excluded by the admin never shows a next slot
+const lowSessions = renderToStaticMarkup(<InspectionCard inspection={{ ...inspection, sessionCount: 3 }} busy={false} onInspect={() => {}} onLogs={() => {}} />);
+assert.ok(lowSessions.includes("fewer than 10 sessions"));
+const excludedCard = renderToStaticMarkup(<InspectionCard inspection={{ ...inspection, excluded: true }} busy={false} onInspect={() => {}} onLogs={() => {}} />);
+assert.ok(excludedCard.includes("excluded from scheduled inspections"));
 // log panel shell: static render never runs effects, so no EventSource fires
 const logPanel = renderToStaticMarkup(<InspectionLogPanel projectId={1} onClose={() => {}} />);
 assert.ok(logPanel.includes("log-panel"));

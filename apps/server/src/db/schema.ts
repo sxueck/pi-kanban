@@ -241,11 +241,11 @@ export const modelSettings = pgTable("model_settings", {
 	model: text("model").notNull().default("gpt-4o-mini"),
 	apiKeyCipher: text("api_key_cipher"),
 	enabled: boolean("enabled").notNull().default(false),
-	inspectionIntervalMinutes: integer("inspection_interval_minutes").notNull().default(60),
-	inspectionWindowStart: integer("inspection_window_start").notNull().default(0),
-	inspectionWindowEnd: integer("inspection_window_end").notNull().default(1439),
+	inspectionStartMinute: integer("inspection_start_minute").notNull().default(540),
 	// weekday bit mask: bit d = weekday d (0 = Sunday); 127 = every day
 	inspectionWeekdays: integer("inspection_weekdays").notNull().default(127),
+	// Projects excluded from scheduled inspections; every other project is included.
+	excludedProjectIds: jsonb("excluded_project_ids").$type<number[]>().notNull().default([]),
 	updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

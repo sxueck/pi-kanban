@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
 import type {
 	InspectionSchedule,
 	ProjectMemoryDTO,
@@ -10,7 +10,7 @@ import type {
 	SessionFindingKind,
 	SessionFindingSeverity,
 } from "@pi-kanban/shared";
-import { computeNextInspectionAt } from "@pi-kanban/shared";
+import { computeNextInspectionAt, MIN_INSPECTION_SESSIONS } from "@pi-kanban/shared";
 import { publish } from "./bus.js";
 import { db } from "./db/index.js";
 import {
@@ -35,6 +35,7 @@ import { FULL_INSPECTION_TIMEOUT_MS, MAX_AGENT_ROUNDS, requestInspectionAgent, r
 import { executeInspectionAgentTool, INSPECTION_AGENT_TOOLS } from "./inspection-agent.js";
 import { buildStructureTree, mergeProjectTree } from "./project-tree.js";
 import { redactForModel, redactText, type Redactable } from "./redact.js";
+import { pushMemoryDigest } from "./memory-digest.js";
 
 export const MAX_INSPECTION_BATCHES = 4;
 const SESSIONS_PER_INSPECTION_BATCH = 3;
@@ -333,6 +334,22 @@ export async function queueProjectInspection(
 	return true;
 }
 
+/**
+ * WHERE clause of the due-inspection sweep, exported so tests can assert its
+ * shape. Skip filters must live in the query: skipped rows (excluded projects,
+ * below the session floor) keep a past nextInspectionAt forever, so post-fetch
+ * filtering would let them saturate any limit and starve runnable projects. A
+ * project that becomes eligible again runs on the next sweep.
+ */
+export function dueInspectionFilter(now: Date, staleBefore: Date, excludedProjectIds: number[]) {
+	return and(
+		lte(projectAnalysisStates.nextInspectionAt, now),
+		or(isNull(projectAnalysisStates.lockedAt), lt(projectAnalysisStates.lockedAt, staleBefore)),
+		notInArray(projectAnalysisStates.projectId, excludedProjectIds),
+		sql`(select count(*) from ${sessions} where ${sessions.userId} = ${projectAnalysisStates.userId} and ${sessions.projectId} = ${projectAnalysisStates.projectId}) >= ${MIN_INSPECTION_SESSIONS}`,
+	);
+}
+
 export async function runDueInspections(): Promise<void> {
 	const now = new Date();
 	const staleBefore = new Date(now.getTime() - INSPECTION_LOCK_TTL_MS);
@@ -351,12 +368,12 @@ export async function runDueInspections(): Promise<void> {
 	const settings = await readModelSettings();
 	if (!settings?.enabled || !settings.apiKeyCipher) return;
 	const due = await db
-		.select({ userId: projectAnalysisStates.userId, projectId: projectAnalysisStates.projectId })
+		.select({
+			userId: projectAnalysisStates.userId,
+			projectId: projectAnalysisStates.projectId,
+		})
 		.from(projectAnalysisStates)
-		.where(and(
-			lte(projectAnalysisStates.nextInspectionAt, now),
-			or(isNull(projectAnalysisStates.lockedAt), lt(projectAnalysisStates.lockedAt, staleBefore)),
-		))
+		.where(dueInspectionFilter(now, staleBefore, settings.excludedProjectIds ?? []))
 		.limit(3);
 	for (const state of due) {
 		try {
@@ -734,6 +751,9 @@ async function persistInspectionResult(
 	await pruneInspectionLogs(userId, projectId);
 	await pruneProjectFindings(userId, projectId);
 	publish({ type: "project_update", userId, projectId });
+	// The loop's downstream half: live pi sessions on this project get the
+	// refreshed memories/findings injected on their next turn.
+	void pushMemoryDigest(userId, projectId);
 }
 
 /** Keeps only the newest RETAINED_PROJECT_FINDINGS findings per project, ordered by recency of last sighting. */
