@@ -12,6 +12,7 @@ import type {
 	HistorySessionDTO,
 	InspectionLogDetailDTO,
 	InspectionLogSummaryDTO,
+	InspectionProjectDTO,
 	LifetimeStatDTO,
 	ModelSettingsInput,
 	ProjectHistoryDTO,
@@ -85,6 +86,7 @@ import {
 	sweepEmptyUuidSessions,
 } from "./inspector.js";
 import { getLiveInspection, subscribeInspectionLive, type InspectionLiveEvent } from "./inspection-live.js";
+import { pushMemoryDigest } from "./memory-digest.js";
 import { addProjectReadCoverage, collectToolCallFiles, mergeSnapshotTree } from "./project-tree.js";
 
 type AppEnv = { Variables: { auth: AuthUser } };
@@ -199,6 +201,24 @@ api.post("/api/settings/model", async (c) => {
 	} catch (error) {
 		return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
 	}
+});
+
+/** All live projects for the inspection exclusion picker (admin only). */
+api.get("/api/settings/model/projects", async (c) => {
+	if (!isAdmin(currentUser(c))) return c.json({ error: "forbidden" }, 403);
+	const rows = await db
+		.select({
+			id: projects.id,
+			name: projects.name,
+			sessionCount: sql<number>`count(${sessions.id})::int`,
+		})
+		.from(projects)
+		.leftJoin(sessions, eq(sessions.projectId, projects.id))
+		.where(isNull(projects.deletedAt))
+		.groupBy(projects.id)
+		.orderBy(projects.name);
+	const dto: InspectionProjectDTO[] = rows;
+	return c.json(dto);
 });
 
 api.post("/api/settings/model/test", async (c) => {
@@ -602,7 +622,7 @@ api.get("/api/projects/:id/work", async (c) => {
 		.limit(1);
 	if (!owned) return c.json({ error: "project not found" }, 404);
 	await ensureProjectAnalysisState(userId, projectId);
-	const [memoryRows, findingRows, stateRows, snapshotRows, readToolRows, settings] = await Promise.all([
+	const [memoryRows, findingRows, stateRows, snapshotRows, readToolRows, settings, sessionCountRows] = await Promise.all([
 		db.select().from(projectMemories).where(and(eq(projectMemories.userId, userId), eq(projectMemories.projectId, projectId), isNull(projectMemories.supersededAt))).orderBy(desc(projectMemories.createdAt)),
 		db.select().from(projectFindings).where(and(eq(projectFindings.userId, userId), eq(projectFindings.projectId, projectId))).orderBy(desc(projectFindings.lastSeenAt), desc(projectFindings.id)).limit(RETAINED_PROJECT_FINDINGS),
 		db.select().from(projectAnalysisStates).where(and(eq(projectAnalysisStates.userId, userId), eq(projectAnalysisStates.projectId, projectId))).limit(1),
@@ -611,6 +631,7 @@ api.get("/api/projects/:id/work", async (c) => {
 			.innerJoin(sessions, eq(toolCalls.sessionId, sessions.id))
 			.where(and(eq(sessions.userId, userId), eq(sessions.projectId, projectId))),
 		readModelSettings(),
+		db.select({ n: sql<number>`count(*)::int` }).from(sessions).where(and(eq(sessions.userId, userId), eq(sessions.projectId, projectId))),
 	]);
 	const state = stateRows[0];
 	const snapshotFiles = asSnapshotFiles(snapshotRows[0]?.files);
@@ -633,7 +654,9 @@ api.get("/api/projects/:id/work", async (c) => {
 		},
 		inspection: {
 			enabled: settings?.enabled ?? false,
-			intervalMinutes: settings?.inspectionIntervalMinutes ?? 60,
+			startMinute: settings?.inspectionStartMinute ?? 540,
+			excluded: (settings?.excludedProjectIds ?? []).includes(projectId),
+			sessionCount: sessionCountRows[0]?.n ?? 0,
 			running: Boolean(state?.lockedAt && Date.now() - state.lockedAt.getTime() < INSPECTION_LOCK_TTL_MS),
 			lastRunAt: state?.lastInspectionAt?.getTime(),
 			nextRunAt: state?.nextInspectionAt?.getTime(),
@@ -867,6 +890,8 @@ api.post("/api/projects/:id/memories/:memoryId/status", async (c) => {
 			return next;
 		});
 		publish({ type: "project_update", userId, projectId });
+		// Curated pin/archive changes what future turns should inject.
+		void pushMemoryDigest(userId, projectId);
 		return c.json(toMemoryDto(created));
 	} catch (error) {
 		if (isUniqueViolation(error) || (error instanceof Error && error.message === "memory version conflict")) {

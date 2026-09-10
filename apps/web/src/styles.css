@@ -2206,21 +2206,16 @@ details pre {
 	flex-shrink: 0;
 }
 
-.schedule-window {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	flex-shrink: 0;
+.exclusion-list {
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	padding: 4px 16px;
+	max-height: 240px;
+	overflow-y: auto;
 }
 
-.schedule-window input[type="time"] {
-	padding: 6px 10px;
-	border: 1px solid var(--border-strong);
-	border-radius: var(--radius-sm);
-	background: var(--bg-card);
-	color: var(--fg);
-	font: inherit;
-	font-variant-numeric: tabular-nums;
+.exclusion-row strong {
+	font-size: 13.5px;
 }
 
 .weekday-seg {

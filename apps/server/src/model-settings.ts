@@ -10,9 +10,6 @@ import { db } from "./db/index.js";
 import { modelSettings, projectAnalysisStates } from "./db/schema.js";
 
 const SETTINGS_ID = 1;
-const MIN_INTERVAL_MINUTES = 5;
-const MAX_INTERVAL_MINUTES = 24 * 60;
-const INTERVAL_OPTIONS = new Set([5, 15, 30, 60, 180, 360, 1440]);
 const ALL_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6];
 
 function encryptionKey(): Buffer {
@@ -46,10 +43,9 @@ export function validateModelSettings(input: ModelSettingsInput): ModelSettingsI
 		typeof input.baseUrl !== "string" ||
 		typeof input.model !== "string" ||
 		typeof input.enabled !== "boolean" ||
-		typeof input.intervalMinutes !== "number" ||
-		typeof input.windowStartMinute !== "number" ||
-		typeof input.windowEndMinute !== "number" ||
+		typeof input.startMinute !== "number" ||
 		!Array.isArray(input.weekdays) ||
+		!Array.isArray(input.excludedProjectIds) ||
 		(input.apiKey !== undefined && typeof input.apiKey !== "string")
 	) {
 		throw new Error("invalid model settings fields");
@@ -67,15 +63,9 @@ export function validateModelSettings(input: ModelSettingsInput): ModelSettingsI
 	const baseUrl = url.toString().replace(/\/$/, "");
 	const model = input.model.trim();
 	if (!model || model.length > 200) throw new Error("model must contain 1-200 characters");
-	if (!Number.isInteger(input.intervalMinutes) || input.intervalMinutes < MIN_INTERVAL_MINUTES || input.intervalMinutes > MAX_INTERVAL_MINUTES || !INTERVAL_OPTIONS.has(input.intervalMinutes)) {
-		throw new Error("intervalMinutes must be one of 5, 15, 30, 60, 180, 360, or 1440");
-	}
-	// Minutes after local midnight; windowEnd is inclusive, so 0–1439 covers the full day.
-	if (!Number.isInteger(input.windowStartMinute) || input.windowStartMinute < 0 || input.windowStartMinute > 1439) {
-		throw new Error("windowStartMinute must be an integer within 0-1439");
-	}
-	if (!Number.isInteger(input.windowEndMinute) || input.windowEndMinute <= input.windowStartMinute || input.windowEndMinute > 1439) {
-		throw new Error("windowEndMinute must be an integer within 1-1439 and after windowStartMinute");
+	// Minutes after local midnight.
+	if (!Number.isInteger(input.startMinute) || input.startMinute < 0 || input.startMinute > 1439) {
+		throw new Error("startMinute must be an integer within 0-1439");
 	}
 	if (input.weekdays.length === 0 || new Set(input.weekdays).size !== input.weekdays.length) {
 		throw new Error("weekdays must be a non-empty list of unique days");
@@ -83,26 +73,29 @@ export function validateModelSettings(input: ModelSettingsInput): ModelSettingsI
 	if (input.weekdays.some((day) => !Number.isInteger(day) || day < 0 || day > 6)) {
 		throw new Error("weekdays entries must be integers within 0-6");
 	}
-	return { ...input, baseUrl, model, weekdays: [...input.weekdays].sort((a, b) => a - b) };
+	const excludedProjectIds = input.excludedProjectIds;
+	if (new Set(excludedProjectIds).size !== excludedProjectIds.length) {
+		throw new Error("excludedProjectIds must be a list of unique project ids");
+	}
+	if (excludedProjectIds.some((id) => !Number.isInteger(id) || id < 1)) {
+		throw new Error("excludedProjectIds entries must be positive integers");
+	}
+	return { ...input, baseUrl, model, weekdays: [...input.weekdays].sort((a, b) => a - b), excludedProjectIds };
+}
+
+export function toInspectionSchedule(row: {
+	inspectionStartMinute: number;
+	inspectionWeekdays: number;
+}): InspectionSchedule {
+	return {
+		startMinute: row.inspectionStartMinute,
+		weekdays: ALL_WEEKDAYS.filter((day) => row.inspectionWeekdays & (1 << day)),
+	};
 }
 
 /** DB stores weekdays as a bit mask: bit d = weekday d (0 = Sunday). */
 function weekdaysToMask(days: number[]): number {
 	return days.reduce((mask, day) => mask | (1 << day), 0);
-}
-
-export function toInspectionSchedule(row: {
-	inspectionIntervalMinutes: number;
-	inspectionWindowStart: number;
-	inspectionWindowEnd: number;
-	inspectionWeekdays: number;
-}): InspectionSchedule {
-	return {
-		intervalMinutes: row.inspectionIntervalMinutes,
-		windowStartMinute: row.inspectionWindowStart,
-		windowEndMinute: row.inspectionWindowEnd,
-		weekdays: ALL_WEEKDAYS.filter((day) => row.inspectionWeekdays & (1 << day)),
-	};
 }
 
 export async function readModelSettings() {
@@ -118,9 +111,7 @@ export type InspectionSchedulePlan =
 	| { type: "clear-schedule" };
 
 function sameSchedule(a: InspectionSchedule, b: InspectionSchedule): boolean {
-	return a.intervalMinutes === b.intervalMinutes
-		&& a.windowStartMinute === b.windowStartMinute
-		&& a.windowEndMinute === b.windowEndMinute
+	return a.startMinute === b.startMinute
 		&& new Set(a.weekdays).size === new Set(b.weekdays).size
 		&& a.weekdays.every((day) => b.weekdays.includes(day));
 }
@@ -179,9 +170,7 @@ export async function saveModelSettings(input: ModelSettingsInput): Promise<Mode
 			{
 				enabled: valid.enabled,
 				schedule: {
-					intervalMinutes: valid.intervalMinutes,
-					windowStartMinute: valid.windowStartMinute,
-					windowEndMinute: valid.windowEndMinute,
+					startMinute: valid.startMinute,
 					weekdays: valid.weekdays,
 				},
 			},
@@ -194,10 +183,9 @@ export async function saveModelSettings(input: ModelSettingsInput): Promise<Mode
 				model: valid.model,
 				apiKeyCipher,
 				enabled: valid.enabled,
-				inspectionIntervalMinutes: valid.intervalMinutes,
-				inspectionWindowStart: valid.windowStartMinute,
-				inspectionWindowEnd: valid.windowEndMinute,
+				inspectionStartMinute: valid.startMinute,
 				inspectionWeekdays: weekdaysToMask(valid.weekdays),
+				excludedProjectIds: valid.excludedProjectIds,
 				updatedAt: now,
 			})
 			.where(eq(modelSettings.id, SETTINGS_ID))
@@ -214,10 +202,9 @@ export function toModelSettingsDto(row: typeof modelSettings.$inferSelect | unde
 		baseUrl: row?.baseUrl ?? "",
 		model: row?.model ?? "gpt-4o-mini",
 		enabled: row?.enabled ?? false,
-		intervalMinutes: row?.inspectionIntervalMinutes ?? 60,
-		windowStartMinute: row?.inspectionWindowStart ?? 0,
-		windowEndMinute: row?.inspectionWindowEnd ?? 1439,
+		startMinute: row?.inspectionStartMinute ?? 540,
 		weekdays: row ? toInspectionSchedule(row).weekdays : [...ALL_WEEKDAYS],
+		excludedProjectIds: row?.excludedProjectIds ?? [],
 		hasApiKey: Boolean(row?.apiKeyCipher),
 		updatedAt: row?.updatedAt.getTime(),
 	};

@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import type { ModelSettingsDTO, ModelSettingsInput, UserDTO } from "@pi-kanban/shared";
+import type { InspectionProjectDTO, ModelSettingsDTO, ModelSettingsInput, UserDTO } from "@pi-kanban/shared";
+import { MIN_INSPECTION_SESSIONS } from "@pi-kanban/shared";
 import { apiErrorMessage, apiPost, useResource } from "../api.js";
 import { useI18n } from "../i18n.js";
-import type { MsgKey } from "../i18n.js";
 import {
 	disableNotifications,
 	enableNotifications,
@@ -18,7 +18,6 @@ const THEME_OPTIONS: Array<{ value: ThemePref; key: "light" | "dark" | "system" 
 	{ value: "system", key: "system" },
 ];
 
-const INTERVAL_MINUTES = [5, 15, 30, 60, 180, 360, 1440];
 /** Monday-first display order; values are Date.getDay() day numbers. */
 const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
 /** 2024-01-07 is a Sunday, so day d maps to a real date for Intl formatting. */
@@ -118,14 +117,14 @@ function ModelSettingsSection() {
 	const { t, locale } = useI18n();
 	const [refreshKey, setRefreshKey] = useState(0);
 	const { data, error, loading } = useResource<ModelSettingsDTO>("/api/settings/model", refreshKey);
+	const { data: projects } = useResource<InspectionProjectDTO[]>("/api/settings/model/projects", refreshKey);
 	const [baseUrl, setBaseUrl] = useState("");
 	const [model, setModel] = useState("");
 	const [apiKey, setApiKey] = useState("");
 	const [enabled, setEnabled] = useState(false);
-	const [intervalMinutes, setIntervalMinutes] = useState(60);
-	const [windowStart, setWindowStart] = useState("00:00");
-	const [windowEnd, setWindowEnd] = useState("23:59");
+	const [startTime, setStartTime] = useState("09:00");
 	const [weekdays, setWeekdays] = useState<Set<number>>(new Set(WEEKDAY_ORDER));
+	const [excluded, setExcluded] = useState<Set<number>>(new Set());
 	const [dirty, setDirty] = useState(false);
 	const [busy, setBusy] = useState(false);
 	const [saveError, setSaveError] = useState<string | null>(null);
@@ -139,10 +138,9 @@ function ModelSettingsSection() {
 		setBaseUrl(data.baseUrl);
 		setModel(data.model);
 		setEnabled(data.enabled);
-		setIntervalMinutes(data.intervalMinutes);
-		setWindowStart(minutesToTime(data.windowStartMinute));
-		setWindowEnd(minutesToTime(data.windowEndMinute));
+		setStartTime(minutesToTime(data.startMinute));
 		setWeekdays(new Set(data.weekdays));
+		setExcluded(new Set(data.excludedProjectIds));
 	}, [data, dirty]);
 
 	function markDirty() {
@@ -162,6 +160,16 @@ function ModelSettingsSection() {
 		});
 	}
 
+	function toggleExcluded(projectId: number) {
+		markDirty();
+		setExcluded((current) => {
+			const next = new Set(current);
+			if (next.has(projectId)) next.delete(projectId);
+			else next.add(projectId);
+			return next;
+		});
+	}
+
 	const weekdayLabel = (day: number): string =>
 		new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en-US", { weekday: "short" }).format(
 			new Date(WEEKDAY_ANCHOR.getFullYear(), WEEKDAY_ANCHOR.getMonth(), WEEKDAY_ANCHOR.getDate() + day),
@@ -173,18 +181,17 @@ function ModelSettingsSection() {
 		setSaveError(null);
 		setSaved(false);
 		const key = apiKey.trim();
-		if (!windowStart || !windowEnd) {
-			setSaveError(t("settings.model.windowInvalid"));
+		if (!startTime) {
+			setSaveError(t("settings.model.startInvalid"));
 			return;
 		}
 		const body: ModelSettingsInput = {
 			baseUrl: baseUrl.trim(),
 			model: model.trim(),
 			enabled,
-			intervalMinutes,
-			windowStartMinute: timeToMinutes(windowStart),
-			windowEndMinute: timeToMinutes(windowEnd),
+			startMinute: timeToMinutes(startTime),
 			weekdays: [...weekdays].sort((a, b) => a - b),
+			excludedProjectIds: [...excluded],
 			// Omitted → keep the current key on the server.
 			...(key ? { apiKey: key } : {}),
 		};
@@ -255,40 +262,15 @@ function ModelSettingsSection() {
 					{saved && <p className="model-saved">{t("settings.model.saved")}</p>}
 					<div className="setting-row">
 						<div>
-							<strong>{t("settings.model.interval")}</strong>
-							<p className="muted">{t("settings.model.scheduleHint")}</p>
+							<strong>{t("settings.model.startTime")}</strong>
+							<p className="muted">{t("settings.model.scheduleHint", { n: MIN_INSPECTION_SESSIONS })}</p>
 						</div>
-						<select
-							value={intervalMinutes}
-							onChange={(event) => { markDirty(); setIntervalMinutes(Number(event.target.value)); }}
-							aria-label={t("settings.model.interval")}
-						>
-							{INTERVAL_MINUTES.map((minutes) => (
-								<option key={minutes} value={minutes}>
-									{t(`settings.model.interval.${minutes}` as MsgKey)}
-								</option>
-							))}
-						</select>
-					</div>
-					<div className="setting-row">
-						<div>
-							<strong>{t("settings.model.window")}</strong>
-						</div>
-						<div className="schedule-window">
-							<input
-								type="time"
-								value={windowStart}
-								onChange={(event) => { markDirty(); setWindowStart(event.target.value); }}
-								aria-label={t("settings.model.window")}
-							/>
-							<span className="muted" aria-hidden="true">–</span>
-							<input
-								type="time"
-								value={windowEnd}
-								onChange={(event) => { markDirty(); setWindowEnd(event.target.value); }}
-								aria-label={t("settings.model.window")}
-							/>
-						</div>
+						<input
+							type="time"
+							value={startTime}
+							onChange={(event) => { markDirty(); setStartTime(event.target.value); }}
+							aria-label={t("settings.model.startTime")}
+						/>
 					</div>
 					<div className="setting-row">
 						<div>
@@ -307,6 +289,33 @@ function ModelSettingsSection() {
 								</button>
 							))}
 						</div>
+					</div>
+					<div className="setting-row">
+						<div>
+							<strong>{t("settings.model.excluded")}</strong>
+							<p className="muted">{t("settings.model.excludedHint")}</p>
+						</div>
+					</div>
+					<div className="exclusion-list">
+						{(projects ?? []).map((project) => (
+							<div key={project.id} className="setting-row exclusion-row">
+								<div>
+									<strong>{project.name}</strong>
+									<p className="muted">{t("history.sessions", { n: project.sessionCount })}</p>
+								</div>
+								<button
+									type="button"
+									role="switch"
+									className={`switch ${excluded.has(project.id) ? "on" : ""}`}
+									aria-checked={excluded.has(project.id)}
+									aria-label={`${t("settings.model.excluded")}: ${project.name}`}
+									onClick={() => toggleExcluded(project.id)}
+								>
+									<span className="switch-knob" />
+								</button>
+							</div>
+						))}
+						{(projects ?? []).length === 0 && <p className="muted">{t("history.empty")}</p>}
 					</div>
 					<div className="setting-row">
 						<div>

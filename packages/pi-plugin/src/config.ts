@@ -8,7 +8,7 @@ import type { PluginConfig } from "@pi-kanban/shared";
 export const PLUGIN_VERSION = "0.1.0";
 
 /** Resolved lazily so tests (and tools) can point the plugin at a scratch dir. */
-function agentDir(): string {
+export function agentDir(): string {
 	return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 }
 

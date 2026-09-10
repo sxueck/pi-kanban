@@ -9,7 +9,7 @@
 		"build": "tsc",
 		"db:push": "drizzle-kit push",
 		"db:studio": "drizzle-kit studio",
-		"test": "tsx test/auth.ts && tsx test/merge-turns.ts && tsx test/board-query.ts && tsx test/project-memory.ts && tsx test/inspection-log-query.ts && tsx test/ws-connections.ts"
+		"test": "tsx test/auth.ts && tsx test/merge-turns.ts && tsx test/board-query.ts && tsx test/project-memory.ts && tsx test/memory-digest.ts && tsx test/due-inspection-query.ts && tsx test/inspection-log-query.ts && tsx test/ws-connections.ts"
 	},
 	"dependencies": {
 		"@hono/node-server": "^1.14.0",

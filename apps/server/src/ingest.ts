@@ -21,6 +21,7 @@ import {
 } from "./db/schema.js";
 import { publish } from "./bus.js";
 import { mergeSnapshotTree } from "./project-tree.js";
+import { buildMemoryDigest } from "./memory-digest.js";
 
 export interface ConnContext {
 	machineId: string;
@@ -74,6 +75,8 @@ export async function handleUpstream(
 			return [];
 		case "heartbeat":
 			return [await onHeartbeat(msg, conn)];
+		case "memory_fetch":
+			return await onMemoryFetch(msg, conn);
 		default:
 			return [];
 	}
@@ -512,6 +515,21 @@ async function onHeartbeat(
 
 function sessionIdFrom(msg: UpstreamMessage): string | undefined {
 	return "sessionId" in msg ? msg.sessionId : undefined;
+}
+
+/** Ownership was already enforced by the sessionId check at the top of handleUpstream. */
+async function onMemoryFetch(
+	msg: Extract<UpstreamMessage, { type: "memory_fetch" }>,
+	conn: ConnContext,
+): Promise<DownstreamMessage[]> {
+	const [session] = await db
+		.select({ projectId: sessions.projectId })
+		.from(sessions)
+		.where(eq(sessions.id, msg.sessionId))
+		.limit(1);
+	if (!session?.projectId) return [];
+	const digest = await buildMemoryDigest(conn.userId, session.projectId, msg.sessionId);
+	return digest ? [digest] : [];
 }
 
 async function sessionBelongsToUser(sessionId: string, userId: string): Promise<boolean> {

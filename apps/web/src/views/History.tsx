@@ -12,6 +12,7 @@ import type {
 	SessionFindingDTO,
 	SessionFindingKind,
 } from "@pi-kanban/shared";
+import { MIN_INSPECTION_SESSIONS } from "@pi-kanban/shared";
 import { apiDelete, apiDownload, apiErrorMessage, apiPost, fmtCost, fmtTime, useResource } from "../api.js";
 import { useI18n } from "../i18n.js";
 import type { MsgKey } from "../i18n.js";
@@ -280,12 +281,16 @@ export function InspectionCard({ inspection, busy, onInspect, onLogs }: {
 	onLogs: () => void;
 }) {
 	const { t, locale } = useI18n();
-	const statusClass = inspection.running ? "state-running" : inspection.enabled ? "state-idle" : "state-offline";
+	const statusClass = inspection.running
+		? "state-running"
+		: inspection.enabled && !inspection.excluded ? "state-idle" : "state-offline";
 	const statusLabel = inspection.running
 		? t("work.inspectRunning")
-		: inspection.enabled
-			? t("work.inspection.enabled")
-			: t("work.inspection.disabled");
+		: inspection.excluded
+			? t("work.inspection.excluded")
+			: inspection.enabled
+				? t("work.inspection.enabled")
+				: t("work.inspection.disabled");
 	return (
 		<section className="rail-card rail-group-item inspection-card">
 			<header>
@@ -293,11 +298,14 @@ export function InspectionCard({ inspection, busy, onInspect, onLogs }: {
 			</header>
 			<span className={`state ${statusClass}`}>{statusLabel}</span>
 			<div className="card-meta">
-				{inspection.enabled && inspection.nextRunAt && (
+				{inspection.enabled && !inspection.excluded && inspection.nextRunAt && (
 					<span>{relativeTime(inspection.nextRunAt, locale)}</span>
 				)}
 			</div>
 			{!inspection.enabled && <p className="muted work-hint">{t("work.inspection.disabledHint")}</p>}
+			{inspection.enabled && !inspection.excluded && inspection.sessionCount < MIN_INSPECTION_SESSIONS && (
+				<p className="muted work-hint">{t("work.inspection.lowSessions", { n: MIN_INSPECTION_SESSIONS })}</p>
+			)}
 			{!inspection.running && !busy && inspection.lastError && (
 				<p className="error work-hint">{inspection.lastError}<br />{t("work.inspection.retryHint")}</p>
 			)}
