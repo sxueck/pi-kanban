@@ -108,6 +108,7 @@ export function ProjectSessions() {
 	const { id } = useParams<{ id: string }>();
 	const { data: sessions, error: sessionsError } = useResource<HistorySessionDTO[]>(
 		id ? `/api/projects/${id}/sessions` : null,
+		refreshKey,
 	);
 	const { data: work, error: workError } = useResource<ProjectWorkDTO>(
 		id ? `/api/projects/${id}/work` : null,
