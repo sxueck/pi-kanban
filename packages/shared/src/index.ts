@@ -168,6 +168,29 @@ export interface MemoryFetchMessage {
 	sessionId: string;
 }
 
+/** Plugin asks the server to search the user's cross-project knowledge base. */
+export interface SearchRequestMessage {
+	type: "search_request";
+	/** Correlates with the search_response reply. */
+	requestId: string;
+	/** Raw query terms; the server tokenizes with the shared CJK-aware tokenizer. */
+	query: string;
+	scope?: SearchScope;
+	/** Max hits per section (server caps at SEARCH_MAX_RESULTS). */
+	limit?: number;
+}
+
+export type SearchScope = "all" | "sessions" | "memories";
+
+/** Server reply to search_request; ok=false carries a user-safe error line. */
+export interface SearchResponseMessage {
+	type: "search_response";
+	requestId: string;
+	ok: boolean;
+	error?: string;
+	results: SearchResultDTO;
+}
+
 export type UpstreamMessage =
 	| HelloMessage
 	| SessionStartMessage
@@ -183,7 +206,8 @@ export type UpstreamMessage =
 	| ApprovalRequestMessage
 	| ApprovalLocalResolutionMessage
 	| HeartbeatMessage
-	| MemoryFetchMessage;
+	| MemoryFetchMessage
+	| SearchRequestMessage;
 
 // ---------------------------------------------------------------------------
 // Downstream: server -> plugin
@@ -222,6 +246,8 @@ export interface MemoryDigestEntry {
 	status: ProjectMemoryStatus;
 	occurrenceCount: number;
 	lastSeenAt: number;
+	/** "global" marks a user-wide principle injected into every project digest. */
+	scope?: MemoryScope;
 }
 
 export interface MemoryDigestFinding {
@@ -261,6 +287,7 @@ export type DownstreamMessage =
 	| ApprovalDecisionMessage
 	| HeartbeatAckMessage
 	| MemoryDigestMessage
+	| SearchResponseMessage
 	| ServerErrorMessage;
 
 // ---------------------------------------------------------------------------
@@ -389,6 +416,8 @@ export interface LifetimeStatDTO {
 
 export type ProjectMemoryStatus = "candidate" | "confirmed" | "pinned" | "archived";
 export type ProjectMemoryKind = "fact" | "decision" | "preference" | "pattern" | "issue";
+/** "project" rows are scoped to one project; "global" rows apply to every project of the user. */
+export type MemoryScope = "project" | "global";
 
 export interface ProjectMemoryDTO {
 	id: string;
@@ -396,6 +425,7 @@ export interface ProjectMemoryDTO {
 	kind: ProjectMemoryKind;
 	content: string;
 	status: ProjectMemoryStatus;
+	scope?: MemoryScope;
 	moduleIds: string[];
 	evidence: Array<{ sessionId: string; turnPosition?: number }>;
 	/** How many inspections re-evidenced this memory (>=1). */
@@ -405,8 +435,16 @@ export interface ProjectMemoryDTO {
 	lastSeenAt: number;
 }
 
-export type SessionFindingKind = "intent_drift" | "context_gap" | "tool_misuse" | "model_error";
+export type SessionFindingKind = "intent_drift" | "context_gap" | "tool_misuse" | "model_error" | "direction_conflict";
 export type SessionFindingSeverity = "info" | "warning" | "error";
+
+/** Evidence pointer: a session turn, or a memory (targetId) the finding conflicts with. */
+export interface FindingEvidence {
+	sessionId?: string;
+	turnPosition?: number;
+	/** memoryKey of the referenced memory (its id in DTOs). */
+	memoryId?: string;
+}
 
 /** Session-behavior finding extracted by an inspection (wish 2 output). */
 export interface SessionFindingDTO {
@@ -419,7 +457,7 @@ export interface SessionFindingDTO {
 	/** Primary session the finding is about, when attributable to one. */
 	sessionId?: string;
 	turnPosition?: number;
-	evidence: Array<{ sessionId: string; turnPosition?: number }>;
+	evidence: FindingEvidence[];
 	occurrenceCount: number;
 	createdAt: number;
 	lastSeenAt: number;
@@ -594,6 +632,65 @@ export interface InspectionProjectDTO {
 	sessionCount: number;
 }
 
+// ---------------------------------------------------------------------------
+// Global decision layer + consistency audit
+// ---------------------------------------------------------------------------
+
+/** A user-wide principle memory (scope="global"; projectId is null). */
+export type GlobalMemoryDTO = ProjectMemoryDTO;
+
+/** Direction-conflict finding raised by the global (cross-project) inspection. */
+export interface GlobalFindingDTO {
+	id: number;
+	kind: SessionFindingKind;
+	severity: SessionFindingSeverity;
+	summary: string;
+	detail?: string;
+	evidence: FindingEvidence[];
+	resolution: "open" | "resolved" | "dismissed";
+	resolvedNote?: string;
+	occurrenceCount: number;
+	createdAt: number;
+	lastSeenAt: number;
+}
+
+/** Direction-conflict finding from a project inspection, with its project. */
+export interface ProjectFindingRefDTO extends SessionFindingDTO {
+	projectId: number;
+	projectName: string;
+}
+
+export interface GlobalInspectionRunDTO {
+	inspectionId: string;
+	trigger: "manual" | "schedule";
+	status: string;
+	startedAt: number;
+	finishedAt?: number;
+	redactionCount: number;
+	hasResponse: boolean;
+	hasReasoning: boolean;
+	error?: string;
+}
+
+export interface ConsistencyStateDTO {
+	running: boolean;
+	lastRunAt?: number;
+	lastError?: string;
+	/** Projects with confirmed/pinned decision memories — the audit's corpus floor. */
+	eligibleProjects: number;
+}
+
+export interface ConsistencyDTO {
+	global: {
+		memories: GlobalMemoryDTO[];
+		findings: GlobalFindingDTO[];
+		runs: GlobalInspectionRunDTO[];
+		state: ConsistencyStateDTO;
+	};
+	/** Project-level direction_conflict findings across every project. */
+	projectFindings: ProjectFindingRefDTO[];
+}
+
 export interface HistorySessionDTO {
 	id: string;
 	title?: string;
@@ -657,6 +754,46 @@ export interface SessionDetailDTO extends BoardSession {
 }
 
 // ---------------------------------------------------------------------------
+// Cross-project search (server -> web/plugin)
+// ---------------------------------------------------------------------------
+
+export const SEARCH_MAX_RESULTS = 20;
+
+/** One session hit: summaries and pointers only — full transcripts stay local. */
+export interface SessionHitDTO {
+	sessionId: string;
+	title?: string;
+	projectId?: number | null;
+	projectName: string;
+	/** BM25-style relevance score, higher is better. */
+	score: number;
+	/** Snippet around the best-matching turn prompt / message excerpt. */
+	snippet?: string;
+	/** Timestamp of the best-matching row. */
+	matchedAt: number;
+	turnPosition?: number;
+}
+
+/** One memory/decision-point hit. */
+export interface MemoryHitDTO {
+	memoryId: string;
+	projectId?: number | null;
+	projectName: string;
+	kind: ProjectMemoryKind;
+	scope?: MemoryScope;
+	status: ProjectMemoryStatus;
+	content: string;
+	score: number;
+	lastSeenAt: number;
+}
+
+export interface SearchResultDTO {
+	query: string;
+	sessions: SessionHitDTO[];
+	memories: MemoryHitDTO[];
+}
+
+// ---------------------------------------------------------------------------
 // Plugin-side local config (~/.pi/agent/pi-kanban.json)
 // ---------------------------------------------------------------------------
 
@@ -707,6 +844,54 @@ export interface PluginConfig {
 	server: { url: string };
 	gate: GateConfig;
 	report: ReportConfig;
+	/** Cross-project cloud search tool (kanban_search). */
+	search?: PluginSearchConfig;
+}
+
+export interface PluginSearchConfig {
+	/** Register the kanban_search tool at all. */
+	enabled: boolean;
+	/** Seconds to wait for the server's search_response before giving up. */
+	timeoutSec: number;
+	/** Max hits per section requested from the server. */
+	maxResults: number;
+}
+
+// ---------------------------------------------------------------------------
+// Search tokenizer (shared by server indexing, server queries and tests)
+// ---------------------------------------------------------------------------
+
+const HAN_RUN = /[\u3400-\u9fff\uf900-\ufaff]+/gu;
+// Hyphen is excluded on purpose: "zod-error" becomes [zod, error] so either
+// word still matches documents that spell it "zod error".
+const WORD_RUN = /[\p{L}\p{N}_]+/gu;
+
+/** CJK runs become character bigrams (single/double-char runs stay whole). */
+function cjkNgrams(run: string): string[] {
+	const chars = [...run];
+	if (chars.length <= 2) return [run];
+	const grams: string[] = [];
+	for (let i = 0; i < chars.length - 1; i++) grams.push(chars.slice(i, i + 2).join(""));
+	return grams;
+}
+
+/** NFKC + lowercase, splits CJK runs into bigrams and words into tokens. */
+export function tokenizeForSearch(text: string): string[] {
+	const normalized = text.normalize("NFKC").toLocaleLowerCase().replace(/\s+/g, " ").trim();
+	const tokens: string[] = [];
+	let cursor = 0;
+	for (const match of normalized.matchAll(HAN_RUN)) {
+		const index = match.index ?? 0;
+		for (const word of normalized.slice(cursor, index).matchAll(WORD_RUN)) {
+			if (word[0]) tokens.push(word[0]);
+		}
+		tokens.push(...cjkNgrams(match[0]));
+		cursor = index + match[0].length;
+	}
+	for (const word of normalized.slice(cursor).matchAll(WORD_RUN)) {
+		if (word[0]) tokens.push(word[0]);
+	}
+	return tokens;
 }
 
 // ---------------------------------------------------------------------------

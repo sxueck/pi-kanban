@@ -255,7 +255,7 @@ export function ProjectSessions() {
 							onStatus={setStatus}
 						/>
 					)}
-					<FindingsCard findings={work.findings} />
+					<FindingsCard findings={work.findings} memories={memories} />
 					<MemoriesCard
 						memories={memories}
 						insights={rootInsights}
@@ -329,10 +329,11 @@ function relativeTime(timestamp: number, locale: "zh" | "en"): string {
 	return new Intl.RelativeTimeFormat(locale === "zh" ? "zh-CN" : "en-US", { numeric: "auto" }).format(value, unit as Intl.RelativeTimeFormatUnit);
 }
 
-const FINDING_KIND_ORDER: SessionFindingKind[] = ["intent_drift", "context_gap", "tool_misuse", "model_error"];
+const FINDING_KIND_ORDER: SessionFindingKind[] = ["direction_conflict", "intent_drift", "context_gap", "tool_misuse", "model_error"];
 
-export function FindingsCard({ findings }: { findings: SessionFindingDTO[] }) {
+export function FindingsCard({ findings, memories = [] }: { findings: SessionFindingDTO[]; memories?: ProjectMemoryDTO[] }) {
 	const { t } = useI18n();
+	const memoryById = new Map(memories.map((memory) => [memory.id, memory]));
 	return (
 		<section className={`board-section rail-group-item memories-section findings-section${findings.length === 0 ? " is-empty" : ""}`}>
 			<header>
@@ -354,7 +355,7 @@ export function FindingsCard({ findings }: { findings: SessionFindingDTO[] }) {
 						</h3>
 						<ul className="memory-list">
 							{items.map((finding) => (
-								<FindingItem key={finding.id} finding={finding} />
+								<FindingItem key={finding.id} finding={finding} memoryById={memoryById} />
 							))}
 						</ul>
 					</div>
@@ -366,7 +367,7 @@ export function FindingsCard({ findings }: { findings: SessionFindingDTO[] }) {
 	);
 }
 
-function FindingItem({ finding }: { finding: SessionFindingDTO }) {
+function FindingItem({ finding, memoryById }: { finding: SessionFindingDTO; memoryById: Map<string, ProjectMemoryDTO> }) {
 	const { t } = useI18n();
 	return (
 		<li className={`insight-item severity-${finding.severity}`}>
@@ -380,6 +381,18 @@ function FindingItem({ finding }: { finding: SessionFindingDTO }) {
 				)}
 			</div>
 			{finding.detail && <p className="work-detail">{finding.detail}</p>}
+			{finding.evidence.some((entry) => entry.memoryId) && (
+				<div className="memory-evidence">
+					{finding.evidence.flatMap((entry, index) => {
+						if (!entry.memoryId) return [];
+						const memory = memoryById.get(entry.memoryId);
+						const label = memory
+							? `${t("finding.memoryRef")} ${memory.content.slice(0, 60)}${memory.content.length > 60 ? "…" : ""}`
+							: `${t("finding.memoryRef")} #${entry.memoryId.slice(0, 8)}`;
+						return [<span key={index} className="mono" title={entry.memoryId}>{label}</span>];
+					})}
+				</div>
+			)}
 			<div className="memory-meta">
 				{fmtTime(finding.createdAt)}
 				{finding.occurrenceCount > 1 && <> · {t("finding.seen", { n: finding.occurrenceCount })} · {t("finding.lastSeen", { time: fmtTime(finding.lastSeenAt) })}</>}

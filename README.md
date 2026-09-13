@@ -8,6 +8,8 @@ Cloud web kanban for [pi](https://github.com/earendil-works/pi-coding-agent) cod
   message, tool-call, todo and cost telemetry.
 - **Session history** — finished sessions grouped by git project.
 - **Project memory** — PII-redacted model inspections produce reviewable, versioned memories plus a project structure and issue tree. Confirmed memories and recurring findings are pushed back to the plugin (`memory_fetch` on session start, a digest push after each inspection) and injected as a bounded advisory block into future session prompts, closing the loop.
+- **Cross-project search** — every reported turn prompt, message excerpt, tool result and memory is tokenized (CJK bigrams + words) into GIN-indexed token arrays at ingest and ranked with BM25. `/api/search` and the dashboard **Search** view query across all projects; the plugin exposes the same corpus to pi sessions as a `kanban_search` tool — cloud answers are summaries and decision points, full transcript replay stays local to `session_search`.
+- **Consistency audit** — a global (cross-project) inspection runs over confirmed/pinned decision memories, flags `direction_conflict` findings (locally-optimal decisions that drift from the product-wide direction), and proposes missing global principles as user-confirmable candidates. Product-wide **global decisions** are managed on the **Consistency** view and injected into every project's digest.
 - **Multi-user isolation** — local username/password accounts, per-user Agent Tokens, and private session, approval, and history views.
 
 A pi **extension** is injected locally and pushes the session stream upstream
@@ -23,10 +25,11 @@ session_start/end ──┐
 turn_start/end      │ WebSocket        ingest → Postgres (drizzle)
 message_end (+cost) ├────────────────▶  approvals ──▶ WS push ──┐      Board / Approvals /
 project_snapshot     │  /agent           inspect → memories/tree ├──◀── SSE  History / Detail
-tool_execution_*    │  /agent           REST /api/*             ├──◀── SSE  History / Detail
+tool_execution_*    │  /agent           search → BM25 ranking   │      Search / Consistency
 tool_call ─(gate)───┤                   SSE /api/events         │      (Vite React SPA)
 heartbeat 30s       │◀─ approval_decision ───────────────────────┘
 (HTTP + WS)         │◀─ memory_digest (post-inspection push → system prompt)
+kanban_search ─────▶ search_request / redacted BM25 reply (cross-project)
 ```
 
 - **Gate** (`tool_call`, blockable): local-first — TUI `ctx.ui.confirm` up to
@@ -44,7 +47,12 @@ heartbeat 30s       │◀─ approval_decision ──────────�
 - **Inspection scheduling**: cron-like — a weekday set plus a daily time window (server time zone) with a fixed interval inside it (e.g. Mon–Fri 09:00–18:00 every 30 min, slots aligned to the window start). Enabling inspections or changing the schedule reschedules idle projects to the schedule's next slot, and disabling stops future scheduled runs without clearing a live lock — an in-flight inspection finishes and releases its own claim. Failed runs reschedule at the next slot (not the 10-minute lock TTL), and manual inspection works even while the scheduler is disabled.
 - **Schema**: `users / web_sessions / agent_tokens / projects / sessions / turns /
   messages / tool_calls / todo_lists+todos / approvals / project_snapshots /
-  project_analysis_states / project_inspections / project_memories / model_settings`.
+  project_analysis_states / project_inspections / project_memories (scope:
+  project|global) / project_findings / global_analysis_states /
+  global_inspections(+logs) / global_findings / model_settings`. Searchable
+  text (turn prompts, message excerpts, tool results, memory contents) carries
+  pre-tokenized `search_tokens` arrays with GIN indexes; a boot-time backfill
+  indexes rows written before the column existed.
 - **Ownership**: each user creates an Agent Token in the dashboard and exports it
   as `PI_KANBAN_TOKEN` on their own pi machines. Every reported session is then
   bound to that user.

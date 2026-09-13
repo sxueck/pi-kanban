@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { staticText } from "./static-text.js";
 
 export type Notify = (message: string, detail?: unknown) => void;
 
@@ -14,7 +14,7 @@ export function registerNotify(pi: ExtensionAPI): Notify {
 	pi.registerEntryRenderer(LOG_ENTRY_TYPE, (entry, _options, theme) => {
 		const data = entry.data as { message?: string; detail?: string };
 		const line = data.detail ? `${data.message} (${data.detail})` : (data.message ?? "");
-		return new Text(theme.fg("dim", `pi-kanban: ${line}`));
+		return staticText(theme.fg("dim", `pi-kanban: ${line}`));
 	});
 	return (message, detail) => {
 		try {

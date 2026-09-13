@@ -1,7 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
 import { truncate } from "@pi-kanban/shared";
-import type { MemoryDigestMessage, TodoSnapshotMessage } from "@pi-kanban/shared";
+import type { MemoryDigestMessage, SearchScope, TodoSnapshotMessage } from "@pi-kanban/shared";
 import { agentDir, agentToken, loadConfig } from "./config.js";
 import { collectProjectSnapshot, gitIdentity, SnapshotThrottle } from "./project-snapshot.js";
 import { cacheStats, loadCachedDigest, MEMORY_PROMPT_BUDGET_BYTES, projectKey, renderMemoryPrompt, saveDigest } from "./memory-cache.js";
@@ -10,6 +9,7 @@ import { Transport } from "./transport.js";
 import { registerNotify, type Notify } from "./notify.js";
 import { TurnState } from "./turn-state.js";
 import { runGate, type GateDeps } from "./gate.js";
+import { staticText } from "./static-text.js";
 
 export { runGate };
 
@@ -76,7 +76,7 @@ export default function (pi: ExtensionAPI): void {
 	const STATUS_ENTRY_TYPE = "pi-kanban-status";
 	pi.registerEntryRenderer(STATUS_ENTRY_TYPE, (entry, _options, theme) => {
 		const text = (entry.data as { text?: string }).text ?? "";
-		return new Text(theme.fg("dim", text));
+		return staticText(theme.fg("dim", text));
 	});
 	pi.registerCommand("kanban-status", {
 		description: "Show pi-kanban connection, memory digest and injection metrics",
@@ -102,6 +102,17 @@ export default function (pi: ExtensionAPI): void {
 			}
 		},
 	});
+
+	// --- cross-project cloud search tool ---------------------------------
+
+	const searchConfig = config.search ?? { enabled: true, timeoutSec: 20, maxResults: 10 };
+	if (searchConfig.enabled) {
+		registerKanbanSearch(pi, {
+			connected: () => transport.connected,
+			request: (query, scope, limit) => transport.requestSearch(query, scope, limit, searchConfig.timeoutSec * 1_000),
+			maxResults: searchConfig.maxResults,
+		});
+	}
 
 	let heartbeat: ReturnType<typeof setInterval> | null = null;
 	const startHeartbeat = () => {
@@ -347,6 +358,96 @@ export default function (pi: ExtensionAPI): void {
 			notify("todo snapshot unavailable");
 		}
 	}
+}
+
+// --- kanban_search tool ---------------------------------------------------------
+
+interface KanbanSearchDeps {
+	connected: () => boolean;
+	request: (query: string, scope: SearchScope, limit: number) => Promise<import("@pi-kanban/shared").SearchResponseMessage | null>;
+	maxResults: number;
+}
+
+const KANBAN_SEARCH_PARAMETERS = {
+	type: "object",
+	properties: {
+		query: {
+			type: "string",
+			minLength: 1,
+			maxLength: 400,
+			description: "Search terms; CJK text is supported. Quote exact phrases.",
+		},
+		scope: {
+			type: "string",
+			enum: ["all", "sessions", "memories"],
+			description: "all (default), sessions (past session summaries), memories (decisions and memories)",
+		},
+		limit: { type: "integer", minimum: 1, maximum: 20, description: "Max hits per section" },
+	},
+	required: ["query"],
+	additionalProperties: false,
+} as const;
+
+function formatKanbanSearchResponse(
+	response: import("@pi-kanban/shared").SearchResponseMessage,
+): string {
+	if (!response.ok) return `Cloud search failed: ${response.error ?? "unknown error"}`;
+	const { sessions, memories } = response.results;
+	if (sessions.length === 0 && memories.length === 0) {
+		return `No cloud matches. Full local transcripts are searchable with the session_search tool.`;
+	}
+	const lines: string[] = [];
+	if (sessions.length > 0) {
+		lines.push(`Sessions (${sessions.length}):`);
+		for (const hit of sessions) {
+			const name = hit.title ? `"${hit.title}" ` : "";
+			lines.push(`• ${hit.sessionId.slice(0, 8)} ${name}@ ${hit.projectName} — score ${hit.score.toFixed(2)}`);
+			if (hit.snippet) lines.push(`    …${truncate(hit.snippet.replace(/\s+/g, " "), 220)}`);
+		}
+	}
+	if (memories.length > 0) {
+		lines.push(`Memories and decisions (${memories.length}):`);
+		for (const hit of memories) {
+			lines.push(`• [${hit.kind}${hit.scope === "global" ? "/global" : ""}] (${hit.status}) ${truncate(hit.content, 240)} — ${hit.projectName}`);
+		}
+	}
+	lines.push("", "Cloud results are summaries and decision points. For any session listed above, recover the full transcript with the local session_search tool (action read, session id prefix) when that session ran on this machine.");
+	return lines.join("\n");
+}
+
+function registerKanbanSearch(pi: ExtensionAPI, deps: KanbanSearchDeps): void {
+	pi.registerTool({
+		name: "kanban_search",
+		label: "Kanban Cloud Search",
+		description:
+			"Search the pi-kanban cloud for past sessions, memories and decision points across every project of this workspace. Returns ranked summaries with session/memory ids; read full transcripts locally via session_search.",
+		promptSnippet: "Cross-project cloud search for past sessions and decisions (kanban_search)",
+		promptGuidelines: [
+			"Use kanban_search when prior decisions, past sessions, or work in OTHER projects is relevant to the current task.",
+			"kanban_search works only while the cloud is reachable; offline it says so — then use the local session_search tool for sessions on this machine.",
+			"For a kanban_search session hit that matters, follow up with session_search (action read) to recover the full transcript.",
+		],
+		parameters: KANBAN_SEARCH_PARAMETERS,
+		async execute(_toolCallId: string, params: { query: string; scope?: string; limit?: number }, signal?: AbortSignal) {
+			if (signal?.aborted) {
+				return { content: [{ type: "text" as const, text: "Cancelled" }], details: {} };
+			}
+			// Offline = inert: no queueing, no network attempts, a clear fallback hint.
+			if (!deps.connected()) {
+				return {
+					content: [{ type: "text" as const, text: "kanban cloud unreachable (offline). Search local sessions with the session_search tool instead." }],
+					details: {},
+			};
+			}
+			const scope: SearchScope = params.scope === "sessions" || params.scope === "memories" ? params.scope : "all";
+			const limit = typeof params.limit === "number" && Number.isInteger(params.limit) ? params.limit : deps.maxResults;
+			const response = await deps.request(params.query.slice(0, 400), scope, limit);
+			const text = response == null
+				? "kanban cloud did not answer within its timeout. Search local sessions with the session_search tool instead."
+				: formatKanbanSearchResponse(response);
+			return { content: [{ type: "text" as const, text }], details: {} };
+		},
+	});
 }
 
 // --- tolerant field extraction -----------------------------------------------------------

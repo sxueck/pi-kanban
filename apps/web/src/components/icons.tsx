@@ -1,6 +1,6 @@
 import type { SessionState } from "@pi-kanban/shared";
 
-export type NavIconName = "board" | "approvals" | "history" | "account" | "settings" | "logout";
+export type NavIconName = "board" | "approvals" | "history" | "search" | "consistency" | "account" | "settings" | "logout";
 
 const NAV_PATHS: Record<NavIconName, React.ReactNode> = {
 	board: (
@@ -19,6 +19,18 @@ const NAV_PATHS: Record<NavIconName, React.ReactNode> = {
 		<>
 			<circle cx="8" cy="8" r="5.5" />
 			<path d="M8 5.2V8l2 1.6" />
+		</>
+	),
+	search: (
+		<>
+			<circle cx="7" cy="7" r="4.4" />
+			<path d="M10.4 10.4 13.4 13.4" />
+		</>
+	),
+	consistency: (
+		<>
+			<path d="M8 2.4 12.6 4.2v3.2c0 3-1.9 5-4.6 6.2-2.7-1.2-4.6-3.2-4.6-6.2V4.2Z" />
+			<path d="M5.9 8.1l1.5 1.5 2.7-3" />
 		</>
 	),
 	account: (

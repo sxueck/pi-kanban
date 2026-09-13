@@ -77,8 +77,8 @@ function finding(severity: string, ageDays = 0, summary = `issue-${severity}`): 
 // Revision covers content (projectName + entries) but not generatedAt.
 {
 	const rows = [memory("pinned", 2)];
-	const a = buildDigestPayload("p", rows, []);
-	const b = buildDigestPayload("p", rows, [], NOW + 5_000);
+	const a = buildDigestPayload("p", rows, [], [], NOW);
+	const b = buildDigestPayload("p", rows, [], [], NOW + 5_000);
 	assert.equal(a.revision, b.revision);
 	const changed = buildDigestPayload("p", [memory("pinned", 3)], []);
 	assert.notEqual(a.revision, changed.revision);

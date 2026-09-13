@@ -15,6 +15,8 @@ import { projectFindings, projectMemories, projects, sessions } from "./db/schem
 import { sendToMachine } from "./ws.js";
 
 export const DIGEST_MEMORY_LIMIT = 24;
+/** Global principles take precedence inside the shared memory budget. */
+export const DIGEST_GLOBAL_MEMORY_LIMIT = 8;
 export const DIGEST_FINDING_LIMIT = 8;
 const DIGEST_MEMORY_CHARS = 300;
 const DIGEST_FINDING_CHARS = 200;
@@ -46,31 +48,37 @@ export interface DigestFindingRow {
 
 /**
  * Orders, caps, and hashes the digest payload. Pure so tests can run without a
- * DB: pinned before confirmed, then by recurrence and recency; findings by
+ * DB: global principles first (pinned before confirmed, then recurrence and
+ * recency), then project memories under the same rules; findings by
  * severity then recency. Items past a cap or the byte budget are dropped whole.
- * The revision hashes only the content, so unchanged projects keep one revision.
+ * The revision hashes only the content, so unchanged inputs keep one revision.
  */
 export function buildDigestPayload(
 	projectName: string,
 	memoryRows: DigestMemoryRow[],
 	findingRows: DigestFindingRow[],
+	globalMemoryRows: DigestMemoryRow[] = [],
 	now = Date.now(),
 ): Omit<MemoryDigestMessage, "type" | "projectId"> {
-	const memories: MemoryDigestEntry[] = memoryRows
+	const rankMemories = (rows: DigestMemoryRow[]) => rows
 		.filter((row) => MEMORY_STATUS_RANK[row.status as ProjectMemoryStatus] !== undefined)
 		.sort((a, b) =>
 			(MEMORY_STATUS_RANK[a.status as ProjectMemoryStatus] ?? UNRANKED) - (MEMORY_STATUS_RANK[b.status as ProjectMemoryStatus] ?? UNRANKED)
 			|| b.occurrenceCount - a.occurrenceCount
 			|| toMs(b.lastSeenAt) - toMs(a.lastSeenAt),
-		)
-		.slice(0, DIGEST_MEMORY_LIMIT)
-		.map((row) => ({
-			kind: row.kind as ProjectMemoryKind,
-			content: truncate(row.content, DIGEST_MEMORY_CHARS),
-			status: row.status as ProjectMemoryStatus,
-			occurrenceCount: row.occurrenceCount,
-			lastSeenAt: toMs(row.lastSeenAt),
-		}));
+		);
+	const toEntry = (scope: "global" | "project") => (row: DigestMemoryRow): MemoryDigestEntry => ({
+		kind: row.kind as ProjectMemoryKind,
+		content: truncate(row.content, DIGEST_MEMORY_CHARS),
+		status: row.status as ProjectMemoryStatus,
+		occurrenceCount: row.occurrenceCount,
+		lastSeenAt: toMs(row.lastSeenAt),
+		scope,
+	});
+	const memories: MemoryDigestEntry[] = [
+		...rankMemories(globalMemoryRows).slice(0, DIGEST_GLOBAL_MEMORY_LIMIT).map(toEntry("global")),
+		...rankMemories(memoryRows).slice(0, DIGEST_MEMORY_LIMIT).map(toEntry("project")),
+	].slice(0, DIGEST_MEMORY_LIMIT);
 	const findings: MemoryDigestFinding[] = findingRows
 		.sort((a, b) =>
 			(FINDING_SEVERITY_RANK[a.severity as SessionFindingSeverity] ?? 3) - (FINDING_SEVERITY_RANK[b.severity as SessionFindingSeverity] ?? 3)
@@ -126,11 +134,11 @@ function digestRevision(projectName: string, memories: MemoryDigestEntry[], find
 	return createHash("sha256").update(JSON.stringify({ projectName, memories, findings })).digest("hex").slice(0, 12);
 }
 
-/** Builds the digest for one project; null when the project does not exist. */
+/** Builds the digest for one project (its memories + the user's global principles); null when the project does not exist. */
 export async function buildMemoryDigest(userId: string, projectId: number, sessionId?: string): Promise<MemoryDigestMessage | null> {
 	const [project] = await db.select({ name: projects.name }).from(projects).where(eq(projects.id, projectId)).limit(1);
 	if (!project) return null;
-	const [memoryRows, findingRows] = await Promise.all([
+	const [memoryRows, findingRows, globalRows] = await Promise.all([
 		db.select({
 			kind: projectMemories.kind,
 			content: projectMemories.content,
@@ -140,6 +148,7 @@ export async function buildMemoryDigest(userId: string, projectId: number, sessi
 		}).from(projectMemories).where(and(
 			eq(projectMemories.userId, userId),
 			eq(projectMemories.projectId, projectId),
+			eq(projectMemories.scope, "project"),
 			isNull(projectMemories.supersededAt),
 		)),
 		db.select({
@@ -149,12 +158,23 @@ export async function buildMemoryDigest(userId: string, projectId: number, sessi
 			occurrenceCount: projectFindings.occurrenceCount,
 			lastSeenAt: projectFindings.lastSeenAt,
 		}).from(projectFindings).where(and(eq(projectFindings.userId, userId), eq(projectFindings.projectId, projectId))),
+		db.select({
+			kind: projectMemories.kind,
+			content: projectMemories.content,
+			status: projectMemories.status,
+			occurrenceCount: projectMemories.occurrenceCount,
+			lastSeenAt: projectMemories.lastSeenAt,
+		}).from(projectMemories).where(and(
+			eq(projectMemories.userId, userId),
+			eq(projectMemories.scope, "global"),
+			isNull(projectMemories.supersededAt),
+		)),
 	]);
 	return {
 		type: "memory_digest",
 		projectId,
 		sessionId,
-		...buildDigestPayload(project.name, memoryRows, findingRows),
+		...buildDigestPayload(project.name, memoryRows, findingRows, globalRows),
 	};
 }
 

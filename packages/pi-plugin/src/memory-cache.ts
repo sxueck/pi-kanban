@@ -69,15 +69,24 @@ export function saveDigest(dir: string, key: string, digest: MemoryDigestMessage
 }
 
 /**
- * Renders the bounded advisory block appended to the system prompt. Lines are
- * dropped whole from the tail once the byte budget is reached; undefined when
- * the digest has nothing worth injecting.
+ * Renders the bounded advisory block appended to the system prompt. Global
+ * principles come first under their own header, then project memories. Lines
+ * are dropped whole from the tail once the byte budget is reached; undefined
+ * when the digest has nothing worth injecting.
  */
 export function renderMemoryPrompt(digest: MemoryDigestMessage, budgetBytes = MEMORY_PROMPT_BUDGET_BYTES): string | undefined {
 	const lines: string[] = [];
-	if (digest.memories.length > 0) {
+	const globalMemories = digest.memories.filter((memory) => memory.scope === "global");
+	const projectMemories = digest.memories.filter((memory) => memory.scope !== "global");
+	if (globalMemories.length > 0) {
+		lines.push("Product-wide direction (pi-kanban): user-defined principles for every project of this workspace. Apply them across all projects unless the repository or the user explicitly overrides them.");
+		for (const memory of globalMemories) {
+			lines.push(`- [${memory.kind}] ${memory.content}${occurrenceSuffix(memory.occurrenceCount)}`);
+		}
+	}
+	if (projectMemories.length > 0) {
 		lines.push("Project memory (pi-kanban): confirmed observations from automated inspections of past sessions in this project. Advisory — apply when relevant, ignore if outdated or contradicted by the repo.");
-		for (const memory of digest.memories) {
+		for (const memory of projectMemories) {
 			lines.push(`- [${memory.kind}] ${memory.content}${occurrenceSuffix(memory.occurrenceCount)}`);
 		}
 	}
