@@ -35,6 +35,11 @@ export PI_KANBAN_TOKEN="<your machine Agent Token from the dashboard Account pag
 	"report": {
 		"excerptChars": 2000,
 		"reportToolInputs": true
+	},
+	"search": {
+		"enabled": true,
+		"timeoutSec": 20,
+		"maxResults": 10
 	}
 }
 ```
@@ -76,12 +81,21 @@ path such as `/kanban/agent` behind a reverse proxy is kept as-is).
   silence.
 - **Project memory injection** (inspection → runtime loop): at `session_start`
   the plugin sends `memory_fetch`; the server replies with a `memory_digest` —
-  the project's confirmed/pinned memories and recurring findings, server-side
-  redacted before persistence, capped at 24 + 8 items / 8 KB. The block is
-  appended to each turn's system prompt (≤ 4 KB, advisory wording). Digests
-  are cached at `~/.pi/agent/pi-kanban-memories.json` (7-day TTL) so injection
-  also works offline or across restarts; pushes after each successful
-  inspection refresh live sessions without waiting for the next session.
+  the user's product-wide global decisions plus the project's confirmed/pinned
+  memories and recurring findings, server-side redacted before persistence,
+  capped at 24 + 8 items / 8 KB. The block is appended to each turn's system
+  prompt (≤ 4 KB, advisory wording). Digests are cached at
+  `~/.pi/agent/pi-kanban-memories.json` (7-day TTL) so injection also works
+  offline or across restarts; pushes after each successful inspection refresh
+  live sessions without waiting for the next session.
+- **Cross-project search** (`kanban_search` tool): queries the server's BM25
+  index over every project's turn prompts, message excerpts, tool results and
+  memories (CJK bigram tokenizer, same ranking family as the local
+  `session_search` extension). The reply is redacted server-side before it
+  reaches a model transcript. Results are ranked summaries and decision points
+  with session ids — recover full transcripts on this machine via the local
+  `session_search` tool. Offline the tool stays inert and points at
+  `session_search`; search requests are never queued in the outbox.
 - **`/kanban-status`**: prints a metrics snapshot into the transcript (display
   only, never sent to the LLM) — connection state and outbox backlog, per-turn
   injection counts, the active digest (revision, age, injected memory/finding

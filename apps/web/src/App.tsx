@@ -8,7 +8,9 @@ import { NavIcon, type NavIconName } from "./components/icons.js";
 import { Account } from "./views/Account.js";
 import { Board } from "./views/Board.js";
 import { Approvals } from "./views/Approvals.js";
+import { Consistency } from "./views/Consistency.js";
 import { History, ProjectSessions } from "./views/History.js";
+import { Search } from "./views/Search.js";
 import { SessionDetail } from "./views/SessionDetail.js";
 import { Settings } from "./views/Settings.js";
 
@@ -37,6 +39,8 @@ export function App() {
 					<Route path="/approvals" element={<Approvals />} />
 					<Route path="/history" element={<History />} />
 					<Route path="/history/project/:id" element={<ProjectSessions />} />
+					<Route path="/search" element={<Search />} />
+					<Route path="/consistency" element={<Consistency />} />
 					<Route path="/sessions/:id" element={<SessionDetail />} />
 					<Route path="/account" element={<Account />} />
 					<Route path="/settings" element={<Settings />} />
@@ -110,14 +114,20 @@ function Nav() {
 	const pendingBadge = usePendingCount();
 	useApprovalNotifications(pendingBadge);
 	const groups: Array<[string, Array<[string, string, NavIconName]>]> = [
-		[t("nav.group.general"), [["/", t("nav.board"), "board"], ["/approvals", t("nav.approvals"), "approvals"], ["/history", t("nav.history"), "history"]]],
+		[t("nav.group.general"), [["/", t("nav.board"), "board"], ["/approvals", t("nav.approvals"), "approvals"], ["/history", t("nav.history"), "history"], ["/search", t("nav.search"), "search"], ["/consistency", t("nav.consistency"), "consistency"]]],
 		[t("nav.group.system"), [["/account", t("nav.account"), "account"], ["/settings", t("nav.settings"), "settings"]]],
 	];
 	const nextLocale = locale === "zh" ? "en" : "zh";
 	return (
 		<nav className="nav">
 			<div className="nav-brand">
-				<span className="brand-icon">π</span>
+				<span className="brand-icon" aria-hidden="true">
+					<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+						<path d="M4 3.5h8" />
+						<path d="M6.2 3.5V12.5" />
+						<path d="M9.8 3.5V12.5" />
+					</svg>
+				</span>
 				<span className="nav-label">pi-kanban</span>
 			</div>
 			{groups.map(([label, links]) => (

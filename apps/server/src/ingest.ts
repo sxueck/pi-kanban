@@ -22,6 +22,8 @@ import {
 import { publish } from "./bus.js";
 import { mergeSnapshotTree } from "./project-tree.js";
 import { buildMemoryDigest } from "./memory-digest.js";
+import { searchTokensFor, searchUserContent } from "./search.js";
+import { redactText } from "./redact.js";
 
 export interface ConnContext {
 	machineId: string;
@@ -77,6 +79,8 @@ export async function handleUpstream(
 			return [await onHeartbeat(msg, conn)];
 		case "memory_fetch":
 			return await onMemoryFetch(msg, conn);
+		case "search_request":
+			return await onSearchRequest(msg, conn);
 		default:
 			return [];
 	}
@@ -232,6 +236,7 @@ async function onTurnStart(
 			sessionId: msg.sessionId,
 			position: msg.position,
 			prompt: msg.prompt,
+			searchTokens: searchTokensFor(msg.prompt),
 			state: "running",
 			startedAt: new Date(msg.startedAt),
 		})
@@ -272,6 +277,7 @@ async function onMessage(msg: Extract<UpstreamMessage, { type: "message" }>) {
 			turnPosition: msg.turnPosition ?? null,
 			role: msg.role,
 			excerpt: msg.excerpt ?? null,
+			searchTokens: searchTokensFor(msg.excerpt),
 			customType: msg.customType ?? null,
 			usage: msg.usage ?? null,
 			costUsd: msg.costUsd ?? null,
@@ -396,6 +402,7 @@ async function onToolResult(
 		.update(toolCalls)
 		.set({
 			resultExcerpt: msg.resultExcerpt ?? null,
+			searchTokens: searchTokensFor(msg.resultExcerpt),
 			isError: msg.isError,
 			endedAt: new Date(msg.endedAt),
 			durationMs: msg.durationMs ?? null,
@@ -530,6 +537,33 @@ async function onMemoryFetch(
 	if (!session?.projectId) return [];
 	const digest = await buildMemoryDigest(conn.userId, session.projectId, msg.sessionId);
 	return digest ? [digest] : [];
+}
+
+const SEARCH_QUERY_MAX_CHARS = 500;
+
+/** Cross-project search over the authenticated user's synced content. */
+async function onSearchRequest(
+	msg: Extract<UpstreamMessage, { type: "search_request" }>,
+	conn: ConnContext,
+): Promise<DownstreamMessage[]> {
+	const empty = { query: msg.query ?? "", sessions: [], memories: [] };
+	if (typeof msg.query !== "string" || !msg.query.trim() || msg.query.length > SEARCH_QUERY_MAX_CHARS) {
+		return [{ type: "search_response", requestId: msg.requestId, ok: false, error: "invalid query", results: empty }];
+	}
+	try {
+		const result = await searchUserContent(conn.userId, msg.query, { scope: msg.scope, limit: msg.limit });
+		// The reply becomes a tool result inside a pi session and may reach a
+		// model transcript; redact before it leaves the server.
+		const results = {
+			query: result.query,
+			sessions: result.sessions.map((hit) => ({ ...hit, snippet: hit.snippet == null ? undefined : redactText(hit.snippet).value })),
+			memories: result.memories.map((hit) => ({ ...hit, content: redactText(hit.content).value })),
+		};
+		return [{ type: "search_response", requestId: msg.requestId, ok: true, results }];
+	} catch (error) {
+		console.error("[pi-kanban] agent search failed:", error instanceof Error ? error.message : error);
+		return [{ type: "search_response", requestId: msg.requestId, ok: false, error: "search failed", results: empty }];
+	}
 }
 
 async function sessionBelongsToUser(sessionId: string, userId: string): Promise<boolean> {

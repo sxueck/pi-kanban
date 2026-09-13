@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { homedir, hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import type { Notify } from "./notify.js";
-import type { PluginConfig } from "@pi-kanban/shared";
+import type { PluginConfig, PluginSearchConfig } from "@pi-kanban/shared";
 
 export const PLUGIN_VERSION = "0.1.0";
 
@@ -38,7 +38,16 @@ function defaultConfig(): PluginConfig {
 			excerptChars: 2000,
 			reportToolInputs: true,
 		},
+		search: {
+			enabled: true,
+			timeoutSec: 20,
+			maxResults: 10,
+		},
 	};
+}
+
+function defaultSearchConfig(): PluginSearchConfig {
+	return { enabled: true, timeoutSec: 20, maxResults: 10 };
 }
 
 /**
@@ -77,6 +86,7 @@ export function loadConfig(onWarning?: Notify): PluginConfig {
 			}
 			if (raw.gate) Object.assign(config.gate, raw.gate);
 			if (raw.report) Object.assign(config.report, raw.report);
+			if (raw.search) Object.assign(config.search ?? (config.search = defaultSearchConfig()), raw.search);
 		} catch (error) {
 			onWarning?.(`invalid config at ${configPath}`, error);
 		}

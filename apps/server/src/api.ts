@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { serveStatic } from "@hono/node-server/serve-static";
@@ -8,7 +9,10 @@ import { and, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import type {
 	ApprovalDTO,
 	BoardSession,
+	ConsistencyDTO,
 	DailyStatDTO,
+	GlobalFindingDTO,
+	GlobalInspectionRunDTO,
 	HistorySessionDTO,
 	InspectionLogDetailDTO,
 	InspectionLogSummaryDTO,
@@ -16,11 +20,13 @@ import type {
 	LifetimeStatDTO,
 	ModelSettingsInput,
 	ProjectHistoryDTO,
+	ProjectMemoryKind,
 	ProjectMemoryStatus,
 	ProjectSnapshotFile,
 	ProjectTreeNodeDTO,
 	ProjectWorkDTO,
 	RecentSessionDTO,
+	SearchResultDTO,
 	SessionDetailDTO,
 	SessionFindingDTO,
 	SessionFindingKind,
@@ -32,6 +38,10 @@ import { db } from "./db/index.js";
 import {
 	agentTokens,
 	approvals,
+	globalAnalysisStates,
+	globalFindings,
+	globalInspections,
+	globalInspectionLogs,
 	messages,
 	projectAnalysisStates,
 	projectFindings,
@@ -88,6 +98,15 @@ import {
 import { getLiveInspection, subscribeInspectionLive, type InspectionLiveEvent } from "./inspection-live.js";
 import { pushMemoryDigest } from "./memory-digest.js";
 import { addProjectReadCoverage, collectToolCallFiles, mergeSnapshotTree } from "./project-tree.js";
+import { searchTokensFor, searchUserContent } from "./search.js";
+import {
+	ensureGlobalAnalysisState,
+	globalEligibleProjectCount,
+	MIN_GLOBAL_PROJECTS,
+	queueGlobalInspection,
+	RETAINED_GLOBAL_INSPECTION_LOGS,
+	toGlobalFindingDto,
+} from "./global-inspector.js";
 
 type AppEnv = { Variables: { auth: AuthUser } };
 export const api = new Hono<AppEnv>();
@@ -901,6 +920,223 @@ api.post("/api/projects/:id/memories/:memoryId/status", async (c) => {
 	}
 });
 
+// --- cross-project search ----------------------------------------------------
+
+api.get("/api/search", async (c) => {
+	const query = c.req.query("q") ?? "";
+	const scopeParam = c.req.query("scope");
+	const scope = scopeParam === "sessions" || scopeParam === "memories" ? scopeParam : "all";
+	const limit = Number(c.req.query("limit") ?? "10");
+	if (!query.trim() || query.length > 500) return c.json({ error: "q must be 1-500 characters" }, 400);
+	const results = await searchUserContent(currentUser(c).id, query, {
+		scope,
+		limit: Number.isInteger(limit) ? limit : undefined,
+	});
+	return c.json(results satisfies SearchResultDTO);
+});
+
+// --- global decision layer + consistency audit --------------------------------
+
+api.get("/api/consistency", async (c) => {
+	const userId = currentUser(c).id;
+	await ensureGlobalAnalysisState(userId);
+	const [stateRows, memoryRows, findingRows, runRows, projectFindingRows, eligibleProjects] = await Promise.all([
+		db.select().from(globalAnalysisStates).where(eq(globalAnalysisStates.userId, userId)).limit(1),
+		db.select().from(projectMemories).where(and(
+			eq(projectMemories.userId, userId),
+			eq(projectMemories.scope, "global"),
+			isNull(projectMemories.supersededAt),
+		)).orderBy(desc(projectMemories.createdAt)),
+		db.select().from(globalFindings).where(eq(globalFindings.userId, userId)).orderBy(desc(globalFindings.lastSeenAt), desc(globalFindings.id)).limit(50),
+		db.select({
+			inspectionId: globalInspections.id,
+			trigger: globalInspections.trigger,
+			status: globalInspections.status,
+			startedAt: globalInspections.startedAt,
+			finishedAt: globalInspections.finishedAt,
+			redactionCount: globalInspections.redactionCount,
+			error: globalInspections.error,
+			hasResponse: sql<boolean>`(${globalInspectionLogs.responseContent} is not null)`,
+			hasReasoning: sql<boolean>`(${globalInspectionLogs.reasoningContent} is not null)`,
+		}).from(globalInspections)
+			.leftJoin(globalInspectionLogs, eq(globalInspectionLogs.inspectionId, globalInspections.id))
+			.where(eq(globalInspections.userId, userId))
+			.orderBy(desc(globalInspections.startedAt))
+			.limit(RETAINED_GLOBAL_INSPECTION_LOGS),
+		db.select({
+			finding: projectFindings,
+			projectId: projects.id,
+			projectName: projects.name,
+		}).from(projectFindings)
+			.innerJoin(projects, eq(projectFindings.projectId, projects.id))
+			.where(and(eq(projectFindings.userId, userId), eq(projectFindings.kind, "direction_conflict")))
+			.orderBy(desc(projectFindings.lastSeenAt))
+			.limit(50),
+		globalEligibleProjectCount(userId),
+	]);
+	const state = stateRows[0];
+	const dto: ConsistencyDTO = {
+		global: {
+			memories: memoryRows.map(toMemoryDto),
+			findings: findingRows.map(toGlobalFindingDto),
+			runs: runRows.map((row) => ({
+				inspectionId: row.inspectionId,
+				trigger: row.trigger as "manual" | "schedule",
+				status: row.status,
+				startedAt: row.startedAt.getTime(),
+				finishedAt: row.finishedAt?.getTime(),
+				redactionCount: row.redactionCount,
+				hasResponse: Boolean(row.hasResponse),
+				hasReasoning: Boolean(row.hasReasoning),
+				error: row.error ?? undefined,
+			} satisfies GlobalInspectionRunDTO)),
+			state: {
+				running: Boolean(state?.lockedAt && Date.now() - state.lockedAt.getTime() < INSPECTION_LOCK_TTL_MS),
+				lastRunAt: state?.lastInspectionAt?.getTime(),
+				lastError: state?.lastError ?? undefined,
+				eligibleProjects,
+			},
+		},
+		projectFindings: projectFindingRows.map((row) => ({
+			...toFindingDto(row.finding),
+			projectId: row.projectId,
+			projectName: row.projectName,
+		})),
+	};
+	return c.json(dto);
+});
+
+api.post("/api/consistency/inspect", async (c) => {
+	const userId = currentUser(c).id;
+	const eligible = await globalEligibleProjectCount(userId);
+	if (eligible < MIN_GLOBAL_PROJECTS) {
+		return c.json({ error: `needs at least ${MIN_GLOBAL_PROJECTS} projects with confirmed or pinned memories` }, 400);
+	}
+	try {
+		const started = await queueGlobalInspection(userId, "manual");
+		return started ? c.json({ started: true }, 202) : c.json({ error: "global inspection already running" }, 409);
+	} catch (error) {
+		return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+	}
+});
+
+api.get("/api/global/memories", async (c) => {
+	const rows = await db.select().from(projectMemories).where(and(
+		eq(projectMemories.userId, currentUser(c).id),
+		eq(projectMemories.scope, "global"),
+		isNull(projectMemories.supersededAt),
+	)).orderBy(desc(projectMemories.createdAt));
+	return c.json(rows.map(toMemoryDto));
+});
+
+api.post("/api/global/memories", async (c) => {
+	const body = await c.req.json<{ kind?: unknown; content?: unknown }>().catch(() => null);
+	const kinds: ProjectMemoryKind[] = ["fact", "decision", "preference", "pattern", "issue"];
+	const kind = body?.kind as ProjectMemoryKind;
+	const content = typeof body?.content === "string" ? body.content.trim() : "";
+	if (!body || !kinds.includes(kind)) return c.json({ error: "kind must be fact, decision, preference, pattern, or issue" }, 400);
+	if (!content || content.length > 600) return c.json({ error: "content must be 1-600 characters" }, 400);
+	const userId = currentUser(c).id;
+	const [created] = await db.insert(projectMemories).values({
+		memoryKey: randomUUID(),
+		userId,
+		projectId: null,
+		scope: "global",
+		version: 1,
+		kind,
+		content,
+		searchTokens: searchTokensFor(content),
+		status: "confirmed",
+		evidence: [],
+	}).returning();
+	publish({ type: "global_update", userId });
+	// A new product-wide principle belongs in every project's digest right away.
+	const projectRows = await db
+		.selectDistinct({ projectId: sessions.projectId })
+		.from(sessions)
+		.where(and(eq(sessions.userId, userId), sql`${sessions.projectId} is not null`));
+	for (const row of projectRows) {
+		if (row.projectId != null) void pushMemoryDigest(userId, row.projectId);
+	}
+	return c.json(toMemoryDto(created), 201);
+});
+
+api.post("/api/global/memories/:memoryId/status", async (c) => {
+	const memoryId = c.req.param("memoryId");
+	if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(memoryId)) {
+		return c.json({ error: "bad memory id" }, 400);
+	}
+	const body = await c.req.json<{ status?: unknown }>().catch(() => null);
+	const statuses: ProjectMemoryStatus[] = ["candidate", "confirmed", "pinned", "archived"];
+	if (!body || !statuses.includes(body.status as ProjectMemoryStatus)) return c.json({ error: "invalid memory status" }, 400);
+	const userId = currentUser(c).id;
+	const [current] = await db.select().from(projectMemories).where(and(
+		eq(projectMemories.memoryKey, memoryId),
+		eq(projectMemories.userId, userId),
+		eq(projectMemories.scope, "global"),
+		isNull(projectMemories.supersededAt),
+	)).limit(1);
+	if (!current) return c.json({ error: "memory not found" }, 404);
+	const now = new Date();
+	try {
+		const created = await db.transaction(async (tx) => {
+			const [superseded] = await tx.update(projectMemories).set({ supersededAt: now }).where(and(eq(projectMemories.id, current.id), isNull(projectMemories.supersededAt))).returning({ id: projectMemories.id });
+			if (!superseded) throw new Error("memory version conflict");
+			const [next] = await tx.insert(projectMemories).values({
+				memoryKey: current.memoryKey,
+				userId,
+				projectId: null,
+				scope: "global",
+				version: current.version + 1,
+				createdAt: current.createdAt,
+				kind: current.kind,
+				content: current.content,
+				status: body.status as ProjectMemoryStatus,
+				moduleIds: current.moduleIds,
+				evidence: current.evidence,
+				sourceInspectionId: current.sourceInspectionId,
+				occurrenceCount: current.occurrenceCount,
+				lastSeenAt: current.lastSeenAt,
+				lastSeenInspectionId: current.lastSeenInspectionId,
+			}).returning();
+			return next;
+		});
+		publish({ type: "global_update", userId });
+		const projectRows = await db
+			.selectDistinct({ projectId: sessions.projectId })
+			.from(sessions)
+			.where(and(eq(sessions.userId, userId), sql`${sessions.projectId} is not null`, sql`${sessions.state} <> 'finished'`));
+		for (const row of projectRows) {
+			if (row.projectId != null) void pushMemoryDigest(userId, row.projectId);
+		}
+		return c.json(toMemoryDto(created));
+	} catch (error) {
+		if (isUniqueViolation(error) || (error instanceof Error && error.message === "memory version conflict")) {
+			return c.json({ error: "memory was updated by another request" }, 409);
+		}
+		throw error;
+	}
+});
+
+api.post("/api/global/findings/:id/resolution", async (c) => {
+	const id = Number(c.req.param("id"));
+	if (!Number.isInteger(id)) return c.json({ error: "bad finding id" }, 400);
+	const body = await c.req.json<{ resolution?: unknown; note?: unknown }>().catch(() => null);
+	const resolutions = ["open", "resolved", "dismissed"] as const;
+	const resolution = body?.resolution as (typeof resolutions)[number] | undefined;
+	if (!body || !resolution || !resolutions.includes(resolution)) {
+		return c.json({ error: "resolution must be open, resolved, or dismissed" }, 400);
+	}
+	const note = typeof body.note === "string" ? body.note.trim().slice(0, 600) : null;
+	const [updated] = await db.update(globalFindings).set({
+		resolution,
+		resolvedNote: resolution === "open" ? null : note,
+	}).where(and(eq(globalFindings.id, id), eq(globalFindings.userId, currentUser(c).id))).returning();
+	if (!updated) return c.json({ error: "finding not found" }, 404);
+	publish({ type: "global_update", userId: currentUser(c).id });
+	return c.json(toGlobalFindingDto(updated));
+});
+
 api.get("/api/projects/:id/sessions", async (c) => {
 	const id = Number(c.req.param("id"));
 	if (!Number.isInteger(id)) return c.json({ error: "bad project id" }, 400);
@@ -1021,7 +1257,7 @@ api.get("/api/events", (c) => {
 });
 
 async function eventBelongsToUser(event: BusEvent, userId: string): Promise<boolean> {
-	if (event.type === "project_update") return event.userId === userId;
+	if (event.type === "project_update" || event.type === "global_update") return event.userId === userId;
 	const [session] = await db.select({ id: sessions.id }).from(sessions).where(and(eq(sessions.id, event.sessionId), eq(sessions.userId, userId))).limit(1);
 	return Boolean(session);
 }

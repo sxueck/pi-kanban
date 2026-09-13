@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
 import type {
+	FindingEvidence,
 	InspectionSchedule,
 	ProjectMemoryDTO,
 	ProjectMemoryKind,
@@ -36,6 +37,7 @@ import { executeInspectionAgentTool, INSPECTION_AGENT_TOOLS } from "./inspection
 import { buildStructureTree, mergeProjectTree } from "./project-tree.js";
 import { redactForModel, redactText, type Redactable } from "./redact.js";
 import { pushMemoryDigest } from "./memory-digest.js";
+import { searchTokensFor } from "./search.js";
 
 export const MAX_INSPECTION_BATCHES = 4;
 const SESSIONS_PER_INSPECTION_BATCH = 3;
@@ -628,8 +630,16 @@ async function persistInspectionResult(
 		? await db.select({ sessionId: turns.sessionId, position: turns.position }).from(turns).where(inArray(turns.sessionId, sessionRows.map((row) => row.id)))
 		: [];
 	const allowedTurns = new Set(turnRows.map((row) => `${row.sessionId}:${row.position}`));
-	const validEvidence = (entry: { sessionId: string; turnPosition?: number }) =>
-		allowedSessions.has(entry.sessionId) && (entry.turnPosition === undefined || allowedTurns.has(`${entry.sessionId}:${entry.turnPosition}`));
+	// direction_conflict evidence may point at the known memories the model was
+	// shown; anything else (unknown ids, other users' rows) is dropped.
+	const allowedMemoryKeys = new Set(existingRows.map((row) => row.memoryKey));
+	const validSessionEvidence = (entry: FindingEvidence) =>
+		entry.sessionId !== undefined
+		&& allowedSessions.has(entry.sessionId)
+		&& (entry.turnPosition === undefined || allowedTurns.has(`${entry.sessionId}:${entry.turnPosition}`));
+	const validEvidence = (entry: FindingEvidence) =>
+		(entry.memoryId !== undefined && allowedMemoryKeys.has(entry.memoryId))
+		|| validSessionEvidence(entry);
 	const files = asSnapshotFiles(snapshotRow[0]?.files);
 	const structure = buildStructureTree(files, projectRow[0]?.name ?? "Project");
 	const structureIds = new Set(structure.map((node) => node.id));
@@ -654,13 +664,15 @@ async function persistInspectionResult(
 				memoryKey: randomUUID(),
 				userId,
 				projectId,
+				scope: "project",
 				version: 1,
 				kind: memory.kind,
 				content: memory.content,
+				searchTokens: searchTokensFor(memory.content),
 				// The model parser only admits directly evidenced high-confidence memories.
 				status: "confirmed",
 				moduleIds: memory.moduleIds,
-				evidence: memory.evidence.filter(validEvidence),
+				evidence: memory.evidence.filter(validSessionEvidence),
 				sourceInspectionId: runId,
 				lastSeenInspectionId: runId,
 			})));
@@ -673,7 +685,7 @@ async function persistInspectionResult(
 				lastSeenAt: now,
 				lastSeenInspectionId: runId,
 				moduleIds: mergeModuleIds(row.moduleIds, candidate.moduleIds),
-				evidence: mergeEvidenceRows(row.evidence, candidate.evidence.filter(validEvidence)),
+				evidence: mergeEvidenceRows(row.evidence, candidate.evidence.filter(validSessionEvidence)),
 			}).where(and(eq(projectMemories.id, row.id), isNull(projectMemories.supersededAt)));
 		}
 		for (const { targetId, candidate } of plan.supersedes) {
@@ -689,12 +701,14 @@ async function persistInspectionResult(
 				memoryKey: row.memoryKey,
 				userId,
 				projectId,
+				scope: "project",
 				version: row.version + 1,
 				kind: candidate.kind,
 				content: candidate.content,
+				searchTokens: searchTokensFor(candidate.content),
 				status: supersedeStatus(row.status),
 				moduleIds: candidate.moduleIds,
-				evidence: mergeEvidenceRows(row.evidence, candidate.evidence.filter(validEvidence)),
+				evidence: mergeEvidenceRows(row.evidence, candidate.evidence.filter(validSessionEvidence)),
 				occurrenceCount: row.occurrenceCount + 1,
 				sourceInspectionId: runId,
 				lastSeenInspectionId: runId,
@@ -780,11 +794,11 @@ function mergeModuleIds(current: unknown, incoming: string[]): string[] {
 	return [...new Set([...asModuleIds(current), ...incoming])].slice(0, 3);
 }
 
-function mergeEvidenceRows(current: unknown, incoming: Array<{ sessionId: string; turnPosition?: number }>): Array<{ sessionId: string; turnPosition?: number }> {
-	const merged = [...asEvidence(current), ...incoming];
+function mergeEvidenceRows(current: unknown, incoming: FindingEvidence[]): FindingEvidence[] {
+	const merged = [...asFindingEvidence(current), ...incoming];
 	const seen = new Set<string>();
 	return merged.filter((entry) => {
-		const key = `${entry.sessionId}:${entry.turnPosition ?? ""}`;
+		const key = `${entry.sessionId ?? ""}:${entry.turnPosition ?? ""}:${entry.memoryId ?? ""}`;
 		if (seen.has(key)) return false;
 		seen.add(key);
 		return true;
@@ -901,6 +915,7 @@ export function toMemoryDto(row: typeof projectMemories.$inferSelect): ProjectMe
 		kind: row.kind as ProjectMemoryKind,
 		content: row.content,
 		status: row.status as ProjectMemoryStatus,
+		scope: row.scope === "global" ? "global" : "project",
 		moduleIds: asModuleIds(row.moduleIds),
 		evidence: asEvidence(row.evidence),
 		occurrenceCount: row.occurrenceCount,
@@ -919,7 +934,7 @@ export function toFindingDto(row: typeof projectFindings.$inferSelect): SessionF
 		summary: row.summary,
 		detail: row.detail ?? undefined,
 		sessionId: row.sessionId ?? undefined,
-		evidence: asEvidence(row.evidence),
+		evidence: asFindingEvidence(row.evidence),
 		occurrenceCount: row.occurrenceCount,
 		createdAt: row.createdAt.getTime(),
 		lastSeenAt: row.lastSeenAt.getTime(),
@@ -1005,6 +1020,20 @@ function asEvidence(value: unknown): Array<{ sessionId: string; turnPosition?: n
 		return typeof item.sessionId === "string"
 			? [{ sessionId: item.sessionId, turnPosition: typeof item.turnPosition === "number" ? item.turnPosition : undefined }]
 			: [];
+	});
+}
+
+/** Finding evidence may also cite a memory id (direction_conflict pairs). */
+function asFindingEvidence(value: unknown): FindingEvidence[] {
+	if (!Array.isArray(value)) return [];
+	return value.flatMap((entry): FindingEvidence[] => {
+		if (!entry || typeof entry !== "object") return [];
+		const item = entry as Record<string, unknown>;
+		const out: FindingEvidence = {};
+		if (typeof item.sessionId === "string" && item.sessionId) out.sessionId = item.sessionId;
+		if (typeof item.turnPosition === "number" && Number.isInteger(item.turnPosition)) out.turnPosition = item.turnPosition;
+		if (typeof item.memoryId === "string" && item.memoryId) out.memoryId = item.memoryId;
+		return Object.keys(out).length > 0 ? [out] : [];
 	});
 }
 

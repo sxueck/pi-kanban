@@ -127,12 +127,17 @@ export const turns = pgTable(
 			.references(() => sessions.id, { onDelete: "cascade" }),
 		position: integer("position").notNull(),
 		prompt: text("prompt").notNull(),
+		/** Pre-tokenized bigram/word tokens powering cross-project search (GIN). */
+		searchTokens: text("search_tokens").array(),
 		state: text("state").notNull().default("running"), // running | done
 		startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
 		endedAt: timestamp("ended_at", { withTimezone: true }),
 		ttftMs: integer("ttft_ms"),
 	},
-	(t) => [unique("uq_turns_session_position").on(t.sessionId, t.position)],
+	(t) => [
+		unique("uq_turns_session_position").on(t.sessionId, t.position),
+		index("idx_turns_search_tokens").using("gin", t.searchTokens),
+	],
 );
 
 export const messages = pgTable(
@@ -146,6 +151,7 @@ export const messages = pgTable(
 		turnPosition: integer("turn_position"),
 		role: text("role").notNull(), // user | assistant | toolResult | custom
 		excerpt: text("excerpt"),
+		searchTokens: text("search_tokens").array(),
 		customType: text("custom_type"),
 		usage: jsonb("usage"),
 		costUsd: doublePrecision("cost_usd"),
@@ -155,6 +161,7 @@ export const messages = pgTable(
 	(t) => [
 		unique("uq_messages_session_position").on(t.sessionId, t.position),
 		index("idx_messages_session").on(t.sessionId),
+		index("idx_messages_search_tokens").using("gin", t.searchTokens),
 	],
 );
 
@@ -170,6 +177,7 @@ export const toolCalls = pgTable(
 		toolName: text("tool_name").notNull(),
 		input: jsonb("input"),
 		resultExcerpt: text("result_excerpt"),
+		searchTokens: text("search_tokens").array(),
 		isError: boolean("is_error"),
 		startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
 		endedAt: timestamp("ended_at", { withTimezone: true }),
@@ -178,6 +186,7 @@ export const toolCalls = pgTable(
 	(t) => [
 		unique("uq_tool_calls_session_call").on(t.sessionId, t.toolCallId),
 		index("idx_tool_calls_session").on(t.sessionId),
+		index("idx_tool_calls_search_tokens").using("gin", t.searchTokens),
 	],
 );
 
@@ -344,12 +353,14 @@ export const projectMemories = pgTable(
 		userId: uuid("user_id")
 			.notNull()
 			.references(() => users.id, { onDelete: "cascade" }),
-		projectId: integer("project_id")
-			.notNull()
-			.references(() => projects.id, { onDelete: "cascade" }),
+		// Null only for scope="global" rows: user-wide principles stored in the
+		// same versioned table so consolidation and the digest share one pipeline.
+		projectId: integer("project_id").references(() => projects.id, { onDelete: "cascade" }),
+		scope: text("scope").notNull().default("project"), // project | global
 		version: integer("version").notNull().default(1),
 		kind: text("kind").notNull(),
 		content: text("content").notNull(),
+		searchTokens: text("search_tokens").array(),
 		status: text("status").notNull().default("candidate"),
 		evidence: jsonb("evidence").notNull(),
 		moduleIds: jsonb("module_ids").notNull().default([]),
@@ -366,6 +377,8 @@ export const projectMemories = pgTable(
 	(t) => [
 		unique("uq_project_memories_key_version").on(t.memoryKey, t.version),
 		index("idx_project_memories_active").on(t.userId, t.projectId, t.supersededAt),
+		index("idx_project_memories_global").on(t.userId, t.scope, t.supersededAt),
+		index("idx_project_memories_search_tokens").using("gin", t.searchTokens),
 	],
 );
 
@@ -394,5 +407,78 @@ export const projectFindings = pgTable(
 	(t) => [
 		index("idx_project_findings_project").on(t.userId, t.projectId, t.createdAt),
 		index("idx_project_findings_recurrence").on(t.userId, t.projectId, t.kind),
+	],
+);
+
+/** Per-user claim + bookkeeping for the global (cross-project) inspection. */
+export const globalAnalysisStates = pgTable(
+	"global_analysis_states",
+	{
+		userId: uuid("user_id")
+			.primaryKey()
+			.references(() => users.id, { onDelete: "cascade" }),
+		lockedAt: timestamp("locked_at", { withTimezone: true }),
+		lastInspectionAt: timestamp("last_inspection_at", { withTimezone: true }),
+		lastError: text("last_error"),
+		updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+);
+
+/** One global consistency-audit run over the user's cross-project decisions. */
+export const globalInspections = pgTable(
+	"global_inspections",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		userId: uuid("user_id")
+			.notNull()
+			.references(() => users.id, { onDelete: "cascade" }),
+		trigger: text("trigger").notNull(), // manual | schedule
+		status: text("status").notNull().default("running"),
+		redactionCount: integer("redaction_count").notNull().default(0),
+	error: text("error"),
+		startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+		finishedAt: timestamp("finished_at", { withTimezone: true }),
+	},
+	(t) => [index("idx_global_inspections_user").on(t.userId, t.startedAt)],
+);
+
+/** Full transcript of a global inspection run, pruned like project logs. */
+export const globalInspectionLogs = pgTable(
+	"global_inspection_logs",
+	{
+		inspectionId: uuid("inspection_id")
+			.primaryKey()
+			.references(() => globalInspections.id, { onDelete: "cascade" }),
+		requestPayload: jsonb("request_payload").notNull(),
+		responseContent: text("response_content"),
+		reasoningContent: text("reasoning_content"),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+);
+
+/** Cross-project direction conflicts raised by global inspections. */
+export const globalFindings = pgTable(
+	"global_findings",
+	{
+		id: serial("id").primaryKey(),
+		userId: uuid("user_id")
+			.notNull()
+			.references(() => users.id, { onDelete: "cascade" }),
+		kind: text("kind").notNull(), // direction_conflict
+		severity: text("severity").notNull(), // info | warning | error
+		summary: text("summary").notNull(),
+		detail: text("detail"),
+		/** [{memoryId?, sessionId?, turnPosition?}] pointers into memories/sessions. */
+		evidence: jsonb("evidence").notNull().default([]),
+		resolution: text("resolution").notNull().default("open"), // open | resolved | dismissed
+		resolvedNote: text("resolved_note"),
+		occurrenceCount: integer("occurrence_count").notNull().default(1),
+		lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+		sourceInspectionId: uuid("source_inspection_id").references(() => globalInspections.id, { onDelete: "set null" }),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(t) => [
+		index("idx_global_findings_user").on(t.userId, t.resolution, t.lastSeenAt),
+		index("idx_global_findings_recurrence").on(t.userId, t.kind),
 	],
 );

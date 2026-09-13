@@ -7,6 +7,8 @@ import { runMigrations } from "./migrate.js";
 import { agentWss, handleUpgrade } from "./ws.js";
 import { sweepExpiredApprovals, sweepOfflineSessions } from "./approvals.js";
 import { cleanEmptyUuidSessions, runDueInspections } from "./inspector.js";
+import { runDueGlobalInspections } from "./global-inspector.js";
+import { backfillSearchTokens } from "./search.js";
 
 const rootEnvFile = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../.env");
 if (existsSync(rootEnvFile)) process.loadEnvFile(rootEnvFile);
@@ -25,6 +27,12 @@ const server = serve({ fetch: api.fetch, port }, (info) => {
 	console.log(`[pi-kanban] plugin ws endpoint: ws://localhost:${info.port}/agent`);
 });
 
+// One-time (idempotent) index backfill for rows written before search tokens
+// existed; runs in the background so listen() is not delayed.
+void backfillSearchTokens().catch((error) => {
+	console.error("[pi-kanban] search backfill failed:", error instanceof Error ? error.message : error);
+});
+
 server.on("upgrade", (req, socket, head) => {
 	const { pathname } = new URL(req.url ?? "/", `http://${req.headers.host}`);
 	if (pathname === "/agent") {
@@ -40,6 +48,9 @@ const sweeper = setInterval(() => {
 	void sweepOfflineSessions();
 	void runDueInspections().catch((error) => {
 		console.error("[pi-kanban] inspection sweep failed:", error instanceof Error ? error.message : error);
+	});
+	void runDueGlobalInspections().catch((error) => {
+		console.error("[pi-kanban] global inspection sweep failed:", error instanceof Error ? error.message : error);
 	});
 }, SWEEP_INTERVAL_MS);
 sweeper.unref();

@@ -4,6 +4,8 @@ import type {
 	DownstreamMessage,
 	HelloMessage,
 	MemoryDigestMessage,
+	SearchResponseMessage,
+	SearchScope,
 	UpstreamMessage,
 } from "@pi-kanban/shared";
 import { PROTOCOL_VERSION } from "@pi-kanban/shared";
@@ -12,6 +14,8 @@ import type { Notify } from "./notify.js";
 
 const OUTBOX_CAP = 500;
 const CREATED_ACK_TIMEOUT_MS = 5_000;
+/** Cloud search replies share the tool-call latency budget of the agent loop. */
+const SEARCH_RESPONSE_TIMEOUT_MS = 20_000;
 /** Connected but no inbound traffic for this long = black hole (sleep, NAT
  * change); force a reconnect instead of waiting minutes for a TCP timeout. */
 const STALE_AFTER_MS = 90_000;
@@ -23,6 +27,8 @@ export type DecisionVerdict = "approved" | "denied" | "offline";
 type DecisionListener = (verdict: DecisionVerdict) => void;
 
 type DigestListener = (digest: MemoryDigestMessage) => void;
+
+type SearchListener = (response: SearchResponseMessage | null) => void;
 
 /**
  * Resilient WebSocket client on Node's native WebSocket (Node >= 22).
@@ -42,6 +48,7 @@ export class Transport {
 	private decisionListeners = new Map<string, Set<DecisionListener>>();
 	private createdWaiters = new Map<string, (approvalId: string) => void>();
 	private digestListeners = new Set<DigestListener>();
+	private searchWaiters = new Map<string, SearchListener>();
 
 	constructor(
 		private readonly url: string,
@@ -183,6 +190,32 @@ export class Transport {
 		return () => this.digestListeners.delete(listener);
 	}
 
+	/**
+	 * Sends a cross-project search request and resolves with the server's
+	 * reply. Null when offline (never queued — a late search reply is useless)
+	 * or when the reply does not arrive within the timeout.
+	 */
+	requestSearch(query: string, scope: SearchScope, limit: number, timeoutMs = SEARCH_RESPONSE_TIMEOUT_MS): Promise<SearchResponseMessage | null> {
+		if (!this.connected) return Promise.resolve(null);
+		const requestId = randomUUID();
+		return new Promise((resolve) => {
+			const finish = (response: SearchResponseMessage | null) => {
+				clearTimeout(timer);
+				this.searchWaiters.delete(requestId);
+				resolve(response);
+			};
+			const timer = setTimeout(() => finish(null), timeoutMs);
+			this.searchWaiters.set(requestId, finish);
+			// Searches are never queued in the outbox: they go out only while the
+			// socket is live, and rawSend failures resolve immediately.
+			try {
+				this.rawSend(JSON.stringify({ type: "search_request", requestId, query, scope, limit }));
+			} catch {
+				finish(null);
+			}
+		});
+	}
+
 	private handleClose(ws: WebSocket): void {
 		if (this.ws !== ws) return;
 		this.ws = null;
@@ -215,6 +248,8 @@ export class Transport {
 		} else if (msg.type === "approval_decision") {
 			const set = this.decisionListeners.get(msg.approvalId);
 			if (set) for (const listener of set) listener(msg.decision);
+		} else if (msg.type === "search_response") {
+			this.searchWaiters.get(msg.requestId)?.(msg);
 		} else if (msg.type === "memory_digest") {
 			for (const listener of [...this.digestListeners]) {
 				try {
@@ -229,6 +264,8 @@ export class Transport {
 	private failWaiters(): void {
 		for (const waiter of this.createdWaiters.values()) waiter("");
 		this.createdWaiters.clear();
+		for (const waiter of this.searchWaiters.values()) waiter(null);
+		this.searchWaiters.clear();
 	}
 
 	private releaseDecisionWaitersOffline(): void {

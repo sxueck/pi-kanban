@@ -406,7 +406,6 @@ function RecentSessionCard({ session }: { session: RecentSessionDTO }) {
 function SessionCard({ session: s }: { session: BoardSession }) {
 	const { t } = useI18n();
 	const todo = s.todo;
-	const contextPct = s.contextWindow ? Math.min(100, Math.round((100 * (s.contextTokens ?? 0)) / s.contextWindow)) : undefined;
 	return (
 		<Link to={`/sessions/${s.id}`} className={`card state-${s.state}`}>
 			<div className="card-head">
@@ -440,13 +439,6 @@ function SessionCard({ session: s }: { session: BoardSession }) {
 				<span>{t("board.turns", { n: s.turnCount })}</span>
 				{s.modelId && <span className="mono">{s.modelId}</span>}
 				<span>{fmtCost(s.totalCostUsd)}</span>
-				{contextPct != null && (
-					<span className="metric context-metric" title={t("board.contextHint", { used: fmtTokens(s.contextTokens ?? 0), total: fmtTokens(s.contextWindow ?? 0) })}>
-						<span className="context-bar">
-							<span className={`context-fill${contextPct >= 90 ? " hot" : ""}`} style={{ width: `${contextPct}%` }} />
-						</span>
-					</span>
-				)}
 				{s.pendingApprovals > 0 && (
 					<span className="approval-badge">{t("board.pendingApproval", { n: s.pendingApprovals })}</span>
 				)}
