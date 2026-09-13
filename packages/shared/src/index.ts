@@ -661,9 +661,14 @@ export interface SessionDetailDTO extends BoardSession {
 // ---------------------------------------------------------------------------
 
 export interface GateRule {
-	/** Tool name to match ("bash", "write", ...). Omit to match any tool. */
+	/**
+	 * Tool scope of the rule ("bash", "powershell", ...). A scoped rule matches
+	 * only command text executed under that scope: `input.command` for the
+	 * tool itself, plus fused `then_run.command` on edit/write for bash (SoL-Pi
+	 * Action Fusion). Omit to match any tool against the whole input JSON.
+	 */
 	tool?: string;
-	/** Case-insensitive substring or regex source applied to the input JSON. */
+	/** Case-insensitive substring or regex source; see `tool` for the target. */
 	match?: string;
 	/** Regex flags for `match` (default "" — substring semantics via RegExp, i ). */
 	flags?: string;
