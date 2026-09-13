@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ApprovalRequestMessage, GateConfig, UpstreamMessage } from "@pi-kanban/shared";
-import { runGate } from "../src/gate.js";
+import type { ApprovalRequestMessage, GateConfig, GateRule, UpstreamMessage } from "@pi-kanban/shared";
+import { matchRule, runGate } from "../src/gate.js";
 import type { GateTransport } from "../src/gate.js";
 import type { DecisionVerdict } from "../src/transport.js";
 import { Transport } from "../src/transport.js";
@@ -321,6 +321,115 @@ const tests: Array<[string, () => Promise<void>]> = [
 			transport.close();
 			await new Promise((resolve) => setTimeout(resolve, 50));
 			assert.deepEqual(verdicts, ["offline"]);
+		},
+	],
+	[
+		"matchRule: fused then_run command faces bash rules (SoL-Pi Action Fusion)",
+		async () => {
+			const rules: GateRule[] = [
+				{ tool: "bash", match: "\\brm\\s+(-[a-z]*r[a-z]*f|[a-z]*f[a-z]*r)", flags: "i", label: "rm -rf" },
+			];
+			for (const toolName of ["edit", "write"]) {
+				const rule = matchRule(rules, toolName, {
+					path: "scripts/build.sh",
+					edits: [{ oldText: "a", newText: "b" }],
+					then_run: { command: "npm test && rm -rf dist", timeout: 60 },
+				});
+				assert.equal(rule?.label, "rm -rf", `${toolName} then_run.command must face bash rules`);
+			}
+		},
+	],
+	[
+		"matchRule: edit payload text cannot trip a scoped bash rule",
+		async () => {
+			const rules: GateRule[] = [
+				{ tool: "bash", match: "\\brm\\s+-rf\\b", flags: "i", label: "rm -rf" },
+			];
+			const rule = matchRule(rules, "edit", {
+				path: "notes.md",
+				edits: [{ oldText: "safe", newText: "run `rm -rf /tmp/x` to clean up" }],
+			});
+			assert.equal(rule, null, "dangerous string in file contents must not match a bash rule");
+		},
+	],
+	[
+		"matchRule: scoped rules see only the command field, not other input fields",
+		async () => {
+			const rules: GateRule[] = [
+				{ tool: "bash", match: "\\brm\\s+-rf\\b", flags: "i", label: "rm -rf" },
+			];
+			assert.equal(
+				matchRule(rules, "bash", { command: "ls", description: "docs: rm -rf explained" }),
+				null,
+				"a bash rule must match input.command only",
+			);
+			assert.ok(
+				matchRule(rules, "bash", { command: "rm -rf build" }),
+				"input.command stays the primary match target",
+			);
+		},
+	],
+	[
+		"matchRule: powershell scope stays isolated from bash rules",
+		async () => {
+			const rules: GateRule[] = [
+				{ tool: "bash", match: "\\brm\\s+-rf\\b", flags: "i", label: "rm -rf" },
+				{ tool: "powershell", match: "\\bRemove-Item\\b", flags: "i", label: "Remove-Item" },
+			];
+			assert.equal(
+				matchRule(rules, "powershell", { command: "Remove-Item -Recurse dist" })?.label,
+				"Remove-Item",
+			);
+			assert.equal(
+				matchRule(rules, "powershell", { command: "bash -c 'rm -rf x'" }),
+				null,
+				"a powershell command string must not face bash rules",
+			);
+		},
+	],
+	[
+		"matchRule: unscoped rules keep the legacy whole-input JSON match",
+		async () => {
+			const rules: GateRule[] = [{ match: "deploy-key", flags: "i", label: "deploy key" }];
+			assert.ok(matchRule(rules, "read", { path: "/secrets/deploy-key.pem" }));
+			assert.equal(matchRule(rules, "read", { path: "/etc/hosts" }), null);
+		},
+	],
+	[
+		"matchRule: edit/write without then_run is inert under scoped rules",
+		async () => {
+			const rules: GateRule[] = [
+				{ tool: "bash", match: "\\brm\\s+-rf\\b", flags: "i", label: "rm -rf" },
+			];
+			assert.equal(matchRule(rules, "write", { path: "a.txt", content: "x" }), null);
+			assert.equal(matchRule(rules, "edit", { path: "a.txt", edits: [] }), null);
+		},
+	],
+	[
+		"runGate: fused edit approval carries the real carrier tool and hit label",
+		async () => {
+			const transport = new FakeTransport();
+			transport.connected = true;
+			const { ctx } = makeCtx(true, false);
+			const result = await runGate(
+				{
+					gate: makeGate({
+						rules: [{ tool: "bash", match: "\\brm\\s+-rf\\b", flags: "i", label: "rm -rf" }],
+					}),
+					transport,
+					getSessionId: () => "s1",
+					getTurnPosition: () => 1,
+				},
+				{
+					toolName: "edit",
+					toolCallId: "tc-fused",
+					input: { path: "a.sh", edits: [], then_run: { command: "rm -rf dist" } },
+				},
+				ctx,
+			);
+			assert.deepEqual(result, { block: true, reason: "Denied locally: rm -rf" });
+			assert.equal(transport.requests[0]?.toolName, "edit");
+			assert.equal(transport.requests[0]?.policyLabel, "rm -rf");
 		},
 	],
 ];

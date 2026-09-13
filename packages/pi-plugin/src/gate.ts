@@ -14,26 +14,79 @@ interface ToolCallEvent {
 	input: unknown;
 }
 
+/**
+ * A command string the input will actually execute, with the tool scope its
+ * rules govern. `then_run` is the SoL-Pi Action Fusion field: an edit/write
+ * may carry a bash command executed inside the same tool call, so it never
+ * surfaces as a bash tool_call — those fused commands must still face bash
+ * rules (see github.com/NVlabs/SoL-Pi).
+ */
+interface CommandCarrier {
+	command: string;
+	/** Tool whose rule scope this command executes under. */
+	scope: string;
+}
+
+function commandCarriers(toolName: string, input: unknown): CommandCarrier[] {
+	if (typeof input !== "object" || input === null) return [];
+	const record = input as Record<string, unknown>;
+	if (toolName === "bash" || toolName === "powershell") {
+		return typeof record.command === "string" ? [{ command: record.command, scope: toolName }] : [];
+	}
+	if (toolName === "edit" || toolName === "write") {
+		const thenRun = record.then_run;
+		if (
+			typeof thenRun === "object" &&
+			thenRun !== null &&
+			typeof (thenRun as Record<string, unknown>).command === "string"
+		) {
+			// SoL-Pi executes then_run through its bash tool definition, so the
+			// fused command always runs in a bash scope regardless of carrier.
+			return [
+				{ command: (thenRun as { command: string }).command, scope: "bash" },
+			];
+		}
+		return [];
+	}
+	return [];
+}
+
 export function matchRule(
 	rules: GateRule[],
 	toolName: string,
 	input: unknown,
 ): GateRule | null {
-	let serialized: string;
-	try {
-		serialized = JSON.stringify(input) ?? "";
-	} catch {
-		serialized = String(input);
-	}
+	const carriers = commandCarriers(toolName, input);
+	let serialized: string | undefined;
+	const inputJson = (): string => {
+		if (serialized === undefined) {
+			try {
+				serialized = JSON.stringify(input) ?? "";
+			} catch {
+				serialized = String(input);
+			}
+		}
+		return serialized;
+	};
 	for (const rule of rules) {
-		if (rule.tool && rule.tool !== toolName) continue;
 		if (!rule.match) return rule;
+		let regex: RegExp;
 		try {
-			if (new RegExp(rule.match, rule.flags ?? "i").test(serialized)) return rule;
+			regex = new RegExp(rule.match, rule.flags ?? "i");
 		} catch {
 			// An invalid approval regex must not silently remove its gate.
 			return rule;
 		}
+		if (rule.tool) {
+			// Scoped rules see only the command text they govern — never edit
+			// payloads — so a dangerous string in file contents cannot trip a
+			// bash rule.
+			if (carriers.some((carrier) => carrier.scope === rule.tool && regex.test(carrier.command))) {
+				return rule;
+			}
+			continue;
+		}
+		if (regex.test(inputJson())) return rule;
 	}
 	return null;
 }
