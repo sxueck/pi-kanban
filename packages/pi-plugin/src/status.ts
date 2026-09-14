@@ -71,7 +71,7 @@ function findingSummary(findings: MemoryDigestMessage["findings"]): string {
 	return `${findings.length}${parts.length > 0 ? ` (${parts.join(", ")})` : ""}`;
 }
 
-function relativeAge(then: number, now: number): string {
+export function relativeAge(then: number, now: number): string {
 	const seconds = Math.max(0, Math.round((now - then) / 1000));
 	if (seconds < 60) return `${seconds}s old`;
 	const minutes = Math.round(seconds / 60);

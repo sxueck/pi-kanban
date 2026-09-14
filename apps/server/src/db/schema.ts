@@ -299,6 +299,10 @@ export const projectAnalysisStates = pgTable(
 		lastInspectionAt: timestamp("last_inspection_at", { withTimezone: true }),
 		lastError: text("last_error"),
 		latestTree: jsonb("latest_tree"),
+		// Per-session incremental inspection cursors: sessionId -> { m: last
+		// inspected messages.id, t: last inspected tool_calls.id }. Absent fields
+		// or sessions mean "send everything" (cold start).
+		sessionCursors: jsonb("session_cursors"),
 		updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 	},
 	(t) => [
