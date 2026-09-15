@@ -5,6 +5,7 @@ import { agentDir, agentToken, loadConfig } from "./config.js";
 import { collectProjectSnapshot, gitIdentity, SnapshotThrottle } from "./project-snapshot.js";
 import { cacheStats, loadCachedDigest, MEMORY_PROMPT_BUDGET_BYTES, projectKey, renderMemoryPrompt, saveDigest } from "./memory-cache.js";
 import { formatStatus, type KanbanStatusSnapshot } from "./status.js";
+import { diffDigests, formatTaste, formatTasteNotice } from "./taste.js";
 import { Transport } from "./transport.js";
 import { registerNotify, type Notify } from "./notify.js";
 import { TurnState } from "./turn-state.js";
@@ -87,9 +88,14 @@ export default function (pi: ExtensionAPI): void {
 	let injectedTurns = 0;
 
 	function applyDigest(digest: MemoryDigestMessage): void {
+		// Diff against the cached revision (the last state this machine saw) so
+		// post-inspection pushes surface what was just mined, TASTE-row style.
+		const previous = activeKey ? loadCachedDigest(agentDir(), activeKey) : null;
 		activeProjectId = digest.projectId;
 		activeDigest = digest;
 		activePromptBlock = renderMemoryPrompt(digest, MEMORY_PROMPT_BUDGET_BYTES);
+		const diff = diffDigests(previous, digest);
+		if (diff) notify(formatTasteNotice(diff));
 		saveDigest(agentDir(), activeKey, digest);
 	}
 
@@ -128,6 +134,34 @@ export default function (pi: ExtensionAPI): void {
 			} catch {
 				// Pre-session or non-interactive modes have no transcript to append to.
 				ctx.ui.notify(formatStatus(snapshot), "info");
+			}
+		},
+	});
+
+	// --- /taste: mined project memories and findings, display-only -----------
+
+	const TASTE_ENTRY_TYPE = "pi-kanban-taste";
+	pi.registerEntryRenderer(TASTE_ENTRY_TYPE, (entry, _options, theme) => {
+		const text = (entry.data as { text?: string }).text ?? "";
+		return staticText(theme.fg("dim", text));
+	});
+	pi.registerCommand("taste", {
+		description: "Show project memories and recurring findings mined by pi-kanban inspections",
+		handler: async (_args, ctx) => {
+			const digest = activeDigest ?? (activeKey ? loadCachedDigest(agentDir(), activeKey) : null);
+			const text = formatTaste({
+				digest,
+				totalTurns,
+				injectedTurns,
+				promptBlockBytes: activePromptBlock ? Buffer.byteLength(activePromptBlock) : 0,
+				promptBudgetBytes: MEMORY_PROMPT_BUDGET_BYTES,
+				now: Date.now(),
+			});
+			try {
+				pi.appendEntry(TASTE_ENTRY_TYPE, { text });
+			} catch {
+				// Pre-session or non-interactive modes have no transcript to append to.
+				ctx.ui.notify(text, "info");
 			}
 		},
 	});

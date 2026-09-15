@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
 import type {
 	FindingEvidence,
 	InspectionSchedule,
@@ -419,9 +419,12 @@ async function executeInspection(
 			.finally(() => { lockHeartbeat = undefined; });
 	};
 	const logPayloads: unknown[] = [];
+	let cursorDelta: SessionCursorMap = {};
 	try {
-		const sections = await buildInspectionSections(userId, projectId);
-		const input = toRedactable(assembleInspectionInput(sections));
+		const { sections, cursors: prevCursors } = await buildInspectionSections(userId, projectId);
+		const assembled = assembleInspectionInput(sections);
+		cursorDelta = cursorDeltaFromPayload(assembled);
+		const input = toRedactable(assembled);
 		const redactedInput = redactForModel(input);
 		let inputRedactions = redactedInput.count;
 		let result: ModelInspectionResult;
@@ -461,6 +464,9 @@ async function executeInspection(
 			reasoningContent = agent.reasoning == null ? undefined : redactText(agent.reasoning).value;
 		} catch (error) {
 			if (!(error instanceof ToolCapabilityError)) throw error;
+			// The single-payload attempt never reached the model, so only the
+			// batch payloads below count as mined rows for the cursors.
+			cursorDelta = {};
 			const batches = splitInspectionBatches(sections);
 			if (batches.length > MAX_INSPECTION_BATCHES) {
 				throw new Error(`inspection exceeded the ${MAX_INSPECTION_BATCHES} batch limit`);
@@ -469,7 +475,9 @@ async function executeInspection(
 			const fallbackPayloads: unknown[] = [];
 			for (const [batchOffset, batch] of batches.entries()) {
 				const batchNumber = batchOffset + 1;
-				const batchInput = toRedactable(assembleInspectionInput(batch, { batch: { index: batchNumber, total: batches.length } }));
+				const assembledBatch = assembleInspectionInput(batch, { batch: { index: batchNumber, total: batches.length } });
+				cursorDelta = mergeSessionCursorDeltas(cursorDelta, cursorDeltaFromPayload(assembledBatch));
+				const batchInput = toRedactable(assembledBatch);
 				const redactedBatch = redactForModel(batchInput);
 				fallbackPayloads.push(redactedBatch.value);
 				inputRedactions += redactedBatch.count;
@@ -510,7 +518,7 @@ async function executeInspection(
 		const responseRedaction = redactText(responseContent);
 		const reasoningRedaction = reasoningContent == null ? undefined : redactText(reasoningContent);
 		await lockHeartbeat;
-		await persistInspectionResult(runId, userId, projectId, schedule, redactedResult.value, inputRedactions + redactedResult.count + responseRedaction.count + (reasoningRedaction?.count ?? 0), lockAt, {
+		await persistInspectionResult(runId, userId, projectId, schedule, redactedResult.value, inputRedactions + redactedResult.count + responseRedaction.count + (reasoningRedaction?.count ?? 0), lockAt, { prev: prevCursors, delta: cursorDelta }, {
 			requestPayload: { runs: logPayloads },
 			responseContent: responseRedaction.value,
 			reasoningContent: reasoningRedaction?.value,
@@ -554,19 +562,105 @@ async function executeInspection(
 	}
 }
 
-async function buildInspectionSections(userId: string, projectId: number): Promise<InspectionInputSections> {
-	const [projectRows, snapshotRows, sessionRows, memoryRows] = await Promise.all([
+/** Incremental inspection cursor for one session: highest row ids already mined. */
+export interface SessionCursor {
+	/** Last inspected messages.id; absent means "send this session's messages from the start". */
+	m?: number;
+	/** Last inspected tool_calls.id; same absence rule. */
+	t?: number;
+}
+export type SessionCursorMap = Record<string, SessionCursor>;
+
+/** Coerces the jsonb round-trip back to a cursor map; anything malformed is dropped. */
+export function normalizeSessionCursors(value: unknown): SessionCursorMap {
+	if (typeof value !== "object" || value == null) return {};
+	const out: SessionCursorMap = {};
+	for (const [sessionId, raw] of Object.entries(value as Record<string, unknown>)) {
+		if (typeof raw !== "object" || raw == null) continue;
+		const cursor: SessionCursor = {};
+		for (const field of ["m", "t"] as const) {
+			const id = (raw as Record<string, unknown>)[field];
+			if (typeof id === "number" && Number.isInteger(id) && id >= 0) cursor[field] = id;
+		}
+		if (cursor.m !== undefined || cursor.t !== undefined) out[sessionId] = cursor;
+	}
+	return out;
+}
+
+/**
+ * Delta from the rows one payload actually included. The minimum included id
+ * per session is the safe advance mark: rows dropped by the byte budget stay
+ * ahead of the cursor and are re-read by the next inspection.
+ */
+export function reduceCursorDelta(rows: Array<Record<string, unknown>>, field: "m" | "t"): SessionCursorMap {
+	const delta: SessionCursorMap = {};
+	for (const row of rows) {
+		const sessionId = row.sessionId;
+		const id = row.id;
+		if (typeof sessionId !== "string" || typeof id !== "number" || !Number.isInteger(id)) continue;
+		const existing = delta[sessionId];
+		if (existing?.[field] !== undefined && existing[field]! <= id) continue;
+		delta[sessionId] = { ...existing, [field]: id };
+	}
+	return delta;
+}
+
+/** Combines two deltas (e.g. one per batch); per session/field the minimum wins. */
+export function mergeSessionCursorDeltas(a: SessionCursorMap, b: SessionCursorMap): SessionCursorMap {
+	const merged: SessionCursorMap = { ...a };
+	for (const [sessionId, cursor] of Object.entries(b)) {
+		const existing = merged[sessionId] ?? {};
+		merged[sessionId] = {
+			...(cursor.m !== undefined && (existing.m === undefined || cursor.m < existing.m) ? { m: cursor.m } : existing.m !== undefined ? { m: existing.m } : {}),
+			...(cursor.t !== undefined && (existing.t === undefined || cursor.t < existing.t) ? { t: cursor.t } : existing.t !== undefined ? { t: existing.t } : {}),
+		};
+	}
+	return merged;
+}
+
+/** Final advance on success: per session/field the cursor only moves forward. */
+export function advanceSessionCursors(prev: SessionCursorMap, delta: SessionCursorMap): SessionCursorMap {
+	const merged: SessionCursorMap = { ...prev };
+	for (const [sessionId, cursor] of Object.entries(delta)) {
+		const existing = merged[sessionId] ?? {};
+		const next: SessionCursor = {};
+		const m = Math.max(existing.m ?? Number.NEGATIVE_INFINITY, cursor.m ?? Number.NEGATIVE_INFINITY);
+		const t = Math.max(existing.t ?? Number.NEGATIVE_INFINITY, cursor.t ?? Number.NEGATIVE_INFINITY);
+		if (m !== Number.NEGATIVE_INFINITY) next.m = m;
+		if (t !== Number.NEGATIVE_INFINITY) next.t = t;
+		if (next.m !== undefined || next.t !== undefined) merged[sessionId] = next;
+	}
+	return merged;
+}
+
+function cursorDeltaFromPayload(payload: { messages: Array<Record<string, unknown>>; failedTools: Array<Record<string, unknown>> }): SessionCursorMap {
+	return mergeSessionCursorDeltas(reduceCursorDelta(payload.messages, "m"), reduceCursorDelta(payload.failedTools, "t"));
+}
+
+async function buildInspectionSections(userId: string, projectId: number): Promise<{ sections: InspectionInputSections; cursors: SessionCursorMap }> {
+	const [projectRows, snapshotRows, sessionRows, memoryRows, stateRows] = await Promise.all([
 		db.select({ name: projects.name, gitRemote: projects.gitRemote }).from(projects).where(eq(projects.id, projectId)).limit(1),
 		db.select().from(projectSnapshots).where(and(eq(projectSnapshots.userId, userId), eq(projectSnapshots.projectId, projectId))).orderBy(desc(projectSnapshots.createdAt)).limit(1),
 		db.select({ id: sessions.id, title: sessions.title, branch: sessions.branch, state: sessions.state, lastActivityAt: sessions.lastActivityAt }).from(sessions).where(and(eq(sessions.userId, userId), eq(sessions.projectId, projectId))).orderBy(desc(sessions.lastActivityAt)).limit(SESSION_LIMIT),
 		db.select({ id: projectMemories.memoryKey, kind: projectMemories.kind, content: projectMemories.content, status: projectMemories.status, occurrenceCount: projectMemories.occurrenceCount }).from(projectMemories).where(and(eq(projectMemories.userId, userId), eq(projectMemories.projectId, projectId), isNull(projectMemories.supersededAt))).orderBy(desc(projectMemories.createdAt), desc(projectMemories.id)).limit(MEMORY_LIMIT),
+		db.select({ sessionCursors: projectAnalysisStates.sessionCursors }).from(projectAnalysisStates).where(and(eq(projectAnalysisStates.userId, userId), eq(projectAnalysisStates.projectId, projectId))).limit(1),
 	]);
 	if (!projectRows[0]) throw new Error("project not found");
+	const cursors = normalizeSessionCursors(stateRows[0]?.sessionCursors);
 	const sessionIds = sessionRows.map((session) => session.id);
+	// Incremental mining: sessions with a cursor contribute only rows beyond it.
+	const messageFilter = or(...sessionIds.map((id) => {
+		const cursor = cursors[id]?.m;
+		return cursor === undefined ? eq(messages.sessionId, id) : and(eq(messages.sessionId, id), gt(messages.id, cursor));
+	}));
+	const toolFilter = or(...sessionIds.map((id) => {
+		const cursor = cursors[id]?.t;
+		return cursor === undefined ? eq(toolCalls.sessionId, id) : and(eq(toolCalls.sessionId, id), gt(toolCalls.id, cursor));
+	}));
 	const [messageRows, failedTools] = sessionIds.length > 0
 		? await Promise.all([
-			db.select({ sessionId: messages.sessionId, turnPosition: messages.turnPosition, role: messages.role, excerpt: messages.excerpt }).from(messages).where(inArray(messages.sessionId, sessionIds)).orderBy(desc(messages.createdAt), desc(messages.id)).limit(MESSAGE_LIMIT),
-			db.select({ sessionId: toolCalls.sessionId, toolName: toolCalls.toolName, result: toolCalls.resultExcerpt }).from(toolCalls).where(and(inArray(toolCalls.sessionId, sessionIds), eq(toolCalls.isError, true))).orderBy(desc(toolCalls.startedAt), desc(toolCalls.id)).limit(TOOL_LIMIT),
+			db.select({ id: messages.id, sessionId: messages.sessionId, turnPosition: messages.turnPosition, role: messages.role, excerpt: messages.excerpt }).from(messages).where(messageFilter).orderBy(desc(messages.createdAt), desc(messages.id)).limit(MESSAGE_LIMIT),
+			db.select({ id: toolCalls.id, sessionId: toolCalls.sessionId, toolName: toolCalls.toolName, result: toolCalls.resultExcerpt }).from(toolCalls).where(and(toolFilter, eq(toolCalls.isError, true))).orderBy(desc(toolCalls.startedAt), desc(toolCalls.id)).limit(TOOL_LIMIT),
 		])
 		: [[], []];
 	const snapshot = snapshotRows[0];
@@ -575,7 +669,7 @@ async function buildInspectionSections(userId: string, projectId: number): Promi
 	// structure tree carries the same layout plus the stable node ids the
 	// model must reference in tree parentId fields.
 	const structureTree = buildStructureTree(files, projectRows[0].name);
-	return {
+	const sections: InspectionInputSections = {
 		project: projectRows[0],
 		snapshot: snapshot ? {
 			fileCount: files.length,
@@ -589,6 +683,7 @@ async function buildInspectionSections(userId: string, projectId: number): Promi
 		failedTools,
 		knownMemories: memoryRows,
 	};
+	return { sections, cursors };
 }
 
 async function persistInspectionResult(
@@ -599,6 +694,7 @@ async function persistInspectionResult(
 	result: ModelInspectionResult,
 	redactionCount: number,
 	claimedAt: Date,
+	cursors: { prev: SessionCursorMap; delta: SessionCursorMap },
 	log: { requestPayload: unknown; responseContent: string; reasoningContent?: string },
 ): Promise<void> {
 	const [projectRow, snapshotRow, existingRows, existingFindingRows] = await Promise.all([
@@ -713,6 +809,17 @@ async function persistInspectionResult(
 				sourceInspectionId: runId,
 				lastSeenInspectionId: runId,
 			});
+		}
+		// Advance the incremental-mining cursors only after the result is committed
+		// with it: a failed run leaves the next inspection reading the same rows.
+		if (Object.keys(cursors.delta).length > 0) {
+			await tx.update(projectAnalysisStates).set({
+				sessionCursors: advanceSessionCursors(cursors.prev, cursors.delta),
+				updatedAt: now,
+			}).where(and(
+				eq(projectAnalysisStates.userId, userId),
+				eq(projectAnalysisStates.projectId, projectId),
+			));
 		}
 		const findingIndex = new Map(existingFindingRows.map((row) => [findingRecurrenceKey({ ...row, sessionId: row.sessionId ?? undefined }), row]));
 		for (const finding of findings) {
