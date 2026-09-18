@@ -284,6 +284,10 @@ try {
 
 	assert.ok(SYSTEM_PROMPT.includes("the model's actions or conclusions departed from the user's stated goal"));
 	assert.ok(SYSTEM_PROMPT.includes("do not flag the user for intentionally changing the goal"));
+	// Transient one-off errors must not become durable memories; recurring failure behavior is findings territory.
+	assert.ok(SYSTEM_PROMPT.includes("never record a transient or one-off failure"));
+	assert.ok(SYSTEM_PROMPT.includes("recurring failure behavior belongs in findings (model_error or tool_misuse)"));
+	assert.ok(SYSTEM_PROMPT.includes("never from a single failure"));
 
 	// Model memory associations are bounded and deduplicated before persistence validation.
 	assert.deepEqual(
