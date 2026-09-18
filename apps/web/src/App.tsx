@@ -111,15 +111,20 @@ function AuthGate({ onOk }: { onOk: () => void }) {
 function Nav() {
 	const { t, locale, setLocale } = useI18n();
 	const { pathname } = useLocation();
+	const navRef = useRef<HTMLElement>(null);
 	const pendingBadge = usePendingCount();
 	useApprovalNotifications(pendingBadge);
+	useEffect(() => {
+		if (!window.matchMedia("(max-width: 720px)").matches) return;
+		navRef.current?.querySelector<HTMLAnchorElement>("a.active")?.scrollIntoView({ block: "nearest", inline: "center" });
+	}, [pathname]);
 	const groups: Array<[string, Array<[string, string, NavIconName]>]> = [
 		[t("nav.group.general"), [["/", t("nav.board"), "board"], ["/approvals", t("nav.approvals"), "approvals"], ["/history", t("nav.history"), "history"], ["/search", t("nav.search"), "search"], ["/consistency", t("nav.consistency"), "consistency"]]],
 		[t("nav.group.system"), [["/account", t("nav.account"), "account"], ["/settings", t("nav.settings"), "settings"]]],
 	];
 	const nextLocale = locale === "zh" ? "en" : "zh";
 	return (
-		<nav className="nav">
+		<nav ref={navRef} className="nav">
 			<div className="nav-brand">
 				<span className="brand-icon" aria-hidden="true">
 					<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -138,7 +143,7 @@ function Nav() {
 						// "/" must stay exact-match or it would highlight everywhere.
 						const active = to === "/" ? pathname === to : pathname === to || pathname.startsWith(`${to}/`);
 						return (
-							<Link key={to} to={to} className={active ? "active" : ""}>
+							<Link key={to} to={to} className={active ? "active" : ""} aria-label={linkLabel}>
 								<NavIcon name={icon} />
 								<span className="nav-label">{linkLabel}</span>
 								{to === "/approvals" && pendingBadge > 0 && <span className="badge">{pendingBadge}</span>}
@@ -152,7 +157,7 @@ function Nav() {
 					<span aria-hidden="true">{locale === "zh" ? "中" : "EN"}</span>
 					<span className="nav-label">{locale === "zh" ? "中文" : "English"}</span>
 				</button>
-				<button type="button" onClick={() => void logout()}>
+				<button type="button" onClick={() => void logout()} aria-label={t("nav.logout")}>
 					<NavIcon name="logout" />
 					<span className="nav-label">{t("nav.logout")}</span>
 				</button>

@@ -11,7 +11,9 @@ const REDACTION_RULES: Array<{ type: string; pattern: RegExp }> = [
 	{ type: "email", pattern: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi },
 	{ type: "home_path", pattern: /\b[A-Z]:\\Users\\[^\\\s]+|\/(?:Users|home)\/[^/\s]+/gi },
 	{ type: "ipv4", pattern: /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g },
-	{ type: "phone", pattern: /(?<![\w.-])(?:\+?\d[\d ()-]{7,}\d)(?![\w.-])/g },
+	// Phone-shaped runs of digits/parens/hyphens; the lookahead excludes ISO dates
+	// (YYYY-MM-DD from git logs / session timestamps) which share the same shape.
+	{ type: "phone", pattern: /(?<![\w.-])(?!\d{4}-\d{2}-\d{2}(?!\d))\+?\d[\d ()-]{7,}\d(?![\w.-])/g },
 ];
 
 export type Redactable = string | number | boolean | null | Redactable[] | { [key: string]: Redactable };

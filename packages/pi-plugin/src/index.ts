@@ -5,7 +5,7 @@ import { agentDir, agentToken, loadConfig } from "./config.js";
 import { collectProjectSnapshot, gitIdentity, SnapshotThrottle } from "./project-snapshot.js";
 import { cacheStats, loadCachedDigest, MEMORY_PROMPT_BUDGET_BYTES, projectKey, renderMemoryPrompt, saveDigest } from "./memory-cache.js";
 import { formatStatus, type KanbanStatusSnapshot } from "./status.js";
-import { diffDigests, formatTaste, formatTasteNotice } from "./taste.js";
+import { formatTaste } from "./taste.js";
 import { Transport } from "./transport.js";
 import { registerNotify, type Notify } from "./notify.js";
 import { TurnState } from "./turn-state.js";
@@ -88,14 +88,11 @@ export default function (pi: ExtensionAPI): void {
 	let injectedTurns = 0;
 
 	function applyDigest(digest: MemoryDigestMessage): void {
-		// Diff against the cached revision (the last state this machine saw) so
-		// post-inspection pushes surface what was just mined, TASTE-row style.
-		const previous = activeKey ? loadCachedDigest(agentDir(), activeKey) : null;
 		activeProjectId = digest.projectId;
 		activeDigest = digest;
 		activePromptBlock = renderMemoryPrompt(digest, MEMORY_PROMPT_BUDGET_BYTES);
-		const diff = diffDigests(previous, digest);
-		if (diff) notify(formatTasteNotice(diff));
+		// No transcript notice on digest change: the plugin stays silent unless a
+		// command (/taste, /kanban-status) is invoked explicitly.
 		saveDigest(agentDir(), activeKey, digest);
 	}
 

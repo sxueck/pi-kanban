@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import type { SearchScope, SearchResultDTO } from "@pi-kanban/shared";
 import { apiErrorMessage, fmtTime, useResource } from "../api.js";
 import { useI18n } from "../i18n.js";
+import { Skeleton } from "../components/skeleton.js";
 
 const SCOPES: SearchScope[] = ["all", "sessions", "memories"];
 
@@ -17,50 +18,79 @@ export function Search() {
 	const [submitted, setSubmitted] = useState("");
 	const [scope, setScope] = useState<SearchScope>("all");
 	const path = submitted ? `/api/search?q=${encodeURIComponent(submitted)}&scope=${scope}` : null;
-	const { data, error, loading } = useResource<SearchResultDTO>(path);
-	const results = data;
+	const { data: results, error, loading } = useResource<SearchResultDTO>(path);
+	const hasResults = Boolean(results && (results.sessions.length > 0 || results.memories.length > 0));
+	const resultCount = (results?.sessions.length ?? 0) + (results?.memories.length ?? 0);
+
+	function submitSearch(value = query) {
+		setQuery(value);
+		setSubmitted(value.trim());
+	}
+
+	function clearSearch() {
+		setQuery("");
+		setSubmitted("");
+	}
 
 	return (
 		<div className="history search-view">
-			<header>
+			<header className="search-header">
 				<h1 className="page-title">{t("search.title")}</h1>
+				<p className="muted search-intro">{t("search.intro")}</p>
 				<form
 					className="search-form"
 					onSubmit={(event) => {
 						event.preventDefault();
-						setSubmitted(query.trim());
+						submitSearch();
 					}}
 				>
+					<label className="sr-only" htmlFor="cross-project-search">{t("search.label")}</label>
 					<input
+						id="cross-project-search"
 						autoFocus
 						value={query}
 						placeholder={t("search.placeholder")}
 						onChange={(event) => setQuery(event.target.value)}
 					/>
-					<div className="board-chips" role="group">
+					<button type="submit" disabled={!query.trim() || loading}>
+						{t("search.submit")}
+					</button>
+					{submitted && (
+						<button className="secondary search-clear" type="button" onClick={clearSearch}>
+							{t("search.clear")}
+						</button>
+					)}
+					<div className="board-chips search-scopes" role="group" aria-label={t("search.scopeLabel")}>
 						{SCOPES.map((value) => (
 							<button
 								key={value}
 								type="button"
 								className={scope === value ? "on" : ""}
 								aria-pressed={scope === value}
+								disabled={loading}
 								onClick={() => setScope(value)}
 							>
 								{t(`search.scope.${value}`)}
 							</button>
 						))}
 					</div>
-					<button type="submit" disabled={!query.trim() || loading}>
-						{t("search.submit")}
-					</button>
 				</form>
 				<p className="muted search-hint">{t("search.hint")}</p>
 			</header>
-			{error && <div className="error">{apiErrorMessage(error)}</div>}
-			{loading && !results && <div className="empty">{t("common.loading")}</div>}
-			{results && results.sessions.length === 0 && results.memories.length === 0 && (
-				<div className="empty">
+
+			{error && <div className="error search-feedback" role="alert">{apiErrorMessage(error)}</div>}
+			{!submitted && <SearchIdle onExample={submitSearch} />}
+			{loading && submitted && <Skeleton className="search-skeleton" rows={3} rowClassName="search-skeleton-row" labelKey="search.loading" />}
+			{results && !hasResults && (
+				<div className="empty search-empty">
 					<h2>{t("search.empty")}</h2>
+					<p>{t("search.emptyHint", { query: submitted, scope: t(`search.scope.${scope}`) })}</p>
+				</div>
+			)}
+			{hasResults && (
+				<div className="search-result-summary" aria-live="polite">
+					<span>{t("search.resultsFor", { query: submitted })}</span>
+					<span className="count">{resultCount}</span>
 				</div>
 			)}
 			{results && results.sessions.length > 0 && (
@@ -73,16 +103,16 @@ export function Search() {
 						{results.sessions.map((hit) => (
 							<li key={hit.sessionId} className="search-hit">
 								<div className="search-hit-head">
+									<span className="work-kind">{t("search.type.session")}</span>
 									<Link className="search-hit-link" to={`/sessions/${hit.sessionId}`} title={hit.sessionId}>
 										{hit.title ?? `#${hit.sessionId.slice(0, 8)}`}
 									</Link>
-									<span className="muted">{hit.projectName}</span>
-									<span className="search-score">{hit.score.toFixed(2)}</span>
+									<span className="search-project">{hit.projectName}</span>
 								</div>
-								{hit.snippet && <p className="work-detail">…{hit.snippet}</p>}
-								<div className="memory-meta">
-									{fmtTime(hit.matchedAt)}
-									{hit.turnPosition != null && <> · turn {hit.turnPosition}</>}
+								{hit.snippet && <p className="work-detail search-snippet">{hit.snippet}</p>}
+								<div className="memory-meta search-meta">
+									<span>{fmtTime(hit.matchedAt)}</span>
+									{hit.turnPosition != null && <span>{t("search.turn", { n: hit.turnPosition })}</span>}
 								</div>
 							</li>
 						))}
@@ -99,22 +129,20 @@ export function Search() {
 						{results.memories.map((hit) => (
 							<li key={hit.memoryId} className="search-hit">
 								<div className="search-hit-head">
-									<span className="work-kind">
-										{t(`memory.kind.${hit.kind}`)}
-										{hit.scope === "global" ? ` · ${t("search.global")}` : ""}
-									</span>
+									<span className="work-kind">{t(`memory.kind.${hit.kind}`)}</span>
 									{hit.projectId != null ? (
 										<Link className="search-hit-link" to={`/history/project/${hit.projectId}`}>
 											{hit.projectName}
 										</Link>
 									) : (
-										<span className="muted">{hit.projectName}</span>
+										<span className="search-project">{hit.projectName}</span>
 									)}
-									<span className="search-score">{hit.score.toFixed(2)}</span>
+									{hit.scope === "global" && <span className="memory-status memory-status-pinned">{t("search.global")}</span>}
 								</div>
 								<p className="memory-content">{hit.content}</p>
-								<div className="memory-meta">
-									{t(`memory.status.${hit.status}`)} · {fmtTime(hit.lastSeenAt)}
+								<div className="memory-meta search-meta">
+									<span>{t(`memory.status.${hit.status}`)}</span>
+									<span>{fmtTime(hit.lastSeenAt)}</span>
 								</div>
 							</li>
 						))}
@@ -122,5 +150,25 @@ export function Search() {
 				</section>
 			)}
 		</div>
+	);
+}
+
+function SearchIdle({ onExample }: { onExample: (query: string) => void }) {
+	const { t } = useI18n();
+	const examples = t("search.exampleQueries").split(",").map((part) => part.trim()).filter(Boolean);
+	return (
+		<section className="search-idle" aria-labelledby="search-idle-title">
+			<div>
+				<h2 id="search-idle-title">{t("search.idle.title")}</h2>
+				<p>{t("search.idle.body")}</p>
+			</div>
+			<div className="search-examples" aria-label={t("search.examples")}>
+				{examples.map((example) => (
+					<button key={example} type="button" className="secondary" onClick={() => onExample(example)}>
+						{example}
+					</button>
+				))}
+			</div>
+		</section>
 	);
 }

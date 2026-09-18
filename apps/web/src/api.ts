@@ -183,7 +183,7 @@ const resourceUpdates = createResourceUpdateChannel(
 );
 
 export interface ResourceLoader {
-	request(path: string): void;
+	request(path: string | null): void;
 	dispose(): void;
 }
 
@@ -238,6 +238,10 @@ export function createResourceLoader<T>(
 		request(next) {
 			if (disposed) return;
 			if (next === path) {
+				if (!next) {
+					notify.loading(false);
+					return;
+				}
 				if (inFlight) {
 					pending = true;
 					return;
@@ -254,6 +258,10 @@ export function createResourceLoader<T>(
 			if (hadPath) {
 				notify.data(null);
 				notify.error(null);
+			}
+			if (!next) {
+				notify.loading(false);
+				return;
 			}
 			start();
 		},
@@ -276,7 +284,7 @@ export function useResource<T>(path: string | null, refreshKey = 0): {
 } {
 	const [data, setData] = useState<T | null>(null);
 	const [error, setError] = useState<Error | null>(null);
-	const [loading, setLoading] = useState(true);
+	const [loading, setLoading] = useState(() => path !== null);
 	const [version, setVersion] = useState(0);
 	const loaderRef = useRef<ResourceLoader | null>(null);
 	const buildLoader = () => createResourceLoader<T>(apiGet, {
@@ -297,7 +305,6 @@ export function useResource<T>(path: string | null, refreshKey = 0): {
 	}, []);
 
 	useEffect(() => {
-		if (!path) return;
 		if (loaderRef.current === null) loaderRef.current = buildLoader();
 		loaderRef.current.request(path);
 	}, [path, version, refreshKey]);

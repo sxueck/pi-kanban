@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
 import { useState } from "react";
 import type { BoardSession, DailyStatDTO, LifetimeStatDTO, RecentSessionDTO, SessionState } from "@pi-kanban/shared";
-import { fmtCost, fmtElapsed, useResource } from "../api.js";
+import { apiErrorMessage, fmtCost, fmtElapsed, useResource } from "../api.js";
 import { useI18n } from "../i18n.js";
 import type { MsgKey } from "../i18n.js";
 import { StateIcon } from "../components/icons.js";
@@ -51,8 +51,8 @@ export function Board() {
 	const { data: lifetime, error: lifetimeError } = useResource<LifetimeStatDTO>("/api/stats/total");
 	const [query, setQuery] = useState("");
 	const [stateFilter, setStateFilter] = useState<SessionState | "all">("all");
-	if (error || recentError || lifetimeError) return <div className="error">{String(error ?? recentError ?? lifetimeError)}</div>;
-	if (loading && !data) return <div className="empty">loading…</div>;
+	if (error || recentError || lifetimeError) return <div className="error" role="alert">{apiErrorMessage(error ?? recentError ?? lifetimeError)}</div>;
+	if (loading && !data) return <div className="empty">{t("common.loading")}</div>;
 
 	const sessions = data ?? [];
 	const byState = groupByState(sessions);
@@ -76,6 +76,10 @@ export function Board() {
 	return (
 		<div className="board-layout">
 			<div className="board-main">
+				<header className="board-page-header">
+					<h1 className="page-title">{t("board.title")}</h1>
+					<p className="muted">{t("board.subtitle")}</p>
+				</header>
 				<section className="board-hero">
 					<div className="hero-main">
 						<span className="hero-label">{t("hero.label")}</span>
@@ -87,7 +91,7 @@ export function Board() {
 						)}
 					</div>
 					<div className="hero-tiles">
-						<HeroTile label={t("hero.pending")} value={stats.waiting} />
+						<HeroTile label={t("hero.pending")} value={stats.waiting} to={stats.waiting > 0 ? "/approvals" : undefined} />
 						<HeroTile label={t("hero.idle")} value={stats.idle} />
 						<HeroTile label={t("hero.projects")} value={stats.projects} />
 						<HeroTile label={t("hero.totalProjects")} value={lifetime != null ? lifetime.totalProjects : "…"} />
@@ -101,6 +105,11 @@ export function Board() {
 					stateFilter={stateFilter}
 					onStateFilter={setStateFilter}
 					chips={chips}
+					filtersActive={filtersActive}
+					onClear={() => {
+						setQuery("");
+						setStateFilter("all");
+					}}
 				/>
 				{(recentFiltered.length > 0 || !filtersActive) && (
 					<section className="board-section recent-section">
@@ -172,12 +181,14 @@ function applyFilters(
 	return { visibleByState, recentFiltered, total };
 }
 
-function BoardToolbar({ query, onQuery, stateFilter, onStateFilter, chips }: {
+function BoardToolbar({ query, onQuery, stateFilter, onStateFilter, chips, filtersActive, onClear }: {
 	query: string;
 	onQuery: (query: string) => void;
 	stateFilter: SessionState | "all";
 	onStateFilter: (filter: SessionState | "all") => void;
 	chips: Array<{ value: SessionState | "all"; label: string; count: number }>;
+	filtersActive: boolean;
+	onClear: () => void;
 }) {
 	const { t } = useI18n();
 	return (
@@ -207,6 +218,7 @@ function BoardToolbar({ query, onQuery, stateFilter, onStateFilter, chips }: {
 					</button>
 				))}
 			</div>
+			{filtersActive && <button type="button" className="secondary" onClick={onClear}>{t("board.clearFilters")}</button>}
 		</div>
 	);
 }
@@ -236,13 +248,9 @@ function BoardSection({ state, list }: { state: SessionState; list: BoardSession
 	);
 }
 
-function HeroTile({ label, value }: { label: string; value: string | number }) {
-	return (
-		<div className="hero-tile">
-			<span className="hero-label">{label}</span>
-			<strong>{value}</strong>
-		</div>
-	);
+function HeroTile({ label, value, to }: { label: string; value: string | number; to?: string }) {
+	const content = <><span className="hero-label">{label}</span><strong>{value}</strong></>;
+	return to ? <Link to={to} className="hero-tile hero-tile-action">{content}</Link> : <div className="hero-tile">{content}</div>;
 }
 
 const CHART_DAYS = 14;
@@ -407,42 +415,47 @@ function SessionCard({ session: s }: { session: BoardSession }) {
 	const { t } = useI18n();
 	const todo = s.todo;
 	return (
-		<Link to={`/sessions/${s.id}`} className={`card state-${s.state}`}>
-			<div className="card-head">
-				<span className="project">{s.projectName}</span>
-				{s.branch && <span className="branch">{s.branch}</span>}
-				<span className={`state state-${s.state}`}>{t(`state.${s.state}` as MsgKey)}</span>
-			</div>
-			<div className="card-title">{s.title ?? t("board.untitled")}</div>
-			{todo && (
-				<div className="todo-progress">
-					<div className="todo-bar">
-						<div
-							className="todo-fill"
-							style={{ width: `${todo.total ? (100 * todo.done) / todo.total : 0}%` }}
-						/>
+		<article className={`card state-${s.state}`}>
+			<Link to={`/sessions/${s.id}`} className="card-primary">
+				<div className="card-head">
+					<span className="project">{s.projectName}</span>
+					{s.branch && <span className="branch">{s.branch}</span>}
+					<span className={`state state-${s.state}`}>{t(`state.${s.state}` as MsgKey)}</span>
+				</div>
+				<div className="card-title">{s.title ?? t("board.untitled")}</div>
+				{todo && (
+					<div className="todo-progress">
+						<div className="todo-bar">
+							<div
+								className="todo-fill"
+								style={{ width: `${todo.total ? (100 * todo.done) / todo.total : 0}%` }}
+							/>
+						</div>
+						<span className="todo-count">
+							{todo.done}/{todo.total}
+						</span>
+						{todo.current && <span className="todo-current">→ {todo.current}</span>}
 					</div>
-					<span className="todo-count">
-						{todo.done}/{todo.total}
-					</span>
-					{todo.current && <span className="todo-current">→ {todo.current}</span>}
-				</div>
-			)}
-			{s.lastMessage?.excerpt && (
-				<div className="last-message">
-					<span className="role-chip">{s.lastMessage.role}</span>
-					<span className="excerpt">{s.lastMessage.excerpt.slice(0, 140)}</span>
-				</div>
-			)}
-			<div className="card-meta">
-				<span>{fmtElapsed(s.startedAt, s.lastActivityAt)}</span>
-				<span>{t("board.turns", { n: s.turnCount })}</span>
-				{s.modelId && <span className="mono">{s.modelId}</span>}
-				<span>{fmtCost(s.totalCostUsd)}</span>
-				{s.pendingApprovals > 0 && (
-					<span className="approval-badge">{t("board.pendingApproval", { n: s.pendingApprovals })}</span>
 				)}
-			</div>
-		</Link>
+				{s.lastMessage?.excerpt && (
+					<div className="last-message">
+						<span className="role-chip">{s.lastMessage.role}</span>
+						<span className="excerpt">{s.lastMessage.excerpt.slice(0, 140)}</span>
+					</div>
+				)}
+				<div className="card-meta">
+					<span>{fmtElapsed(s.startedAt, s.lastActivityAt)}</span>
+					<span>{t("board.turns", { n: s.turnCount })}</span>
+					{s.modelId && <span className="mono">{s.modelId}</span>}
+					<span>{fmtCost(s.totalCostUsd)}</span>
+				</div>
+			</Link>
+			{s.pendingApprovals > 0 && (
+				<Link className="card-approval-action" to="/approvals">
+					<span>{t("board.pendingApproval", { n: s.pendingApprovals })}</span>
+					<span>{t("board.reviewApproval")}</span>
+				</Link>
+			)}
+		</article>
 	);
 }

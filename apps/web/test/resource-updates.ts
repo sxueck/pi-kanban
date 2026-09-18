@@ -193,6 +193,20 @@ function makeLoader() {
 	assert.ok(events.includes("data:fresh-from-4"));
 }
 
+// clearing a conditional resource path drops stale data, ignores its late
+// response, and returns to a non-loading idle state
+{
+	const { events, fetches, loader, flush } = makeLoader();
+	loader.request("/api/search?q=pnpm");
+	loader.request(null);
+	assert.ok(events.includes("data:null"), "clearing a path must clear its visible result");
+	assert.ok(events.includes("loading:false"), "clearing a path must leave the resource idle");
+	const eventsAfterClear = events.length;
+	fetches[0].resolve("late-search-result");
+	await flush();
+	assert.equal(events.length, eventsAfterClear, "a cleared resource must ignore its late response");
+}
+
 // errors surface and clear on the next successful refresh
 {
 	const { events, fetches, loader, flush } = makeLoader();
