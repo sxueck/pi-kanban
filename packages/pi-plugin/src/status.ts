@@ -32,10 +32,7 @@ export function formatStatus(snapshot: KanbanStatusSnapshot): string {
 	}
 
 	const digest = snapshot.digest;
-	if (!digest) {
-		lines.push("  project     no digest (fetch pending or server unreachable)");
-		lines.push(`  injection   inactive · budget ${snapshot.promptBudgetBytes} B`);
-	} else {
+	if (digest) {
 		lines.push(`  project     ${digest.projectName} (#${digest.projectId})`);
 		lines.push(`  digest      rev ${digest.revision} · ${relativeAge(digest.generatedAt, snapshot.now)}`);
 		const pinned = digest.memories.filter((m) => m.status === "pinned").length;
@@ -44,6 +41,9 @@ export function formatStatus(snapshot: KanbanStatusSnapshot): string {
 		lines.push(`  findings    ${findingSummary(digest.findings)}`);
 		const active = snapshot.promptBlockBytes > 0;
 		lines.push(`  injection   ${active ? "active" : "inactive (empty digest)"} · ${snapshot.promptBlockBytes} / ${snapshot.promptBudgetBytes} B`);
+	} else {
+		lines.push("  project     no digest (fetch pending or server unreachable)");
+		lines.push(`  injection   inactive · budget ${snapshot.promptBudgetBytes} B`);
 	}
 
 	if (snapshot.cacheEntries.length > 0) {

@@ -31,7 +31,7 @@ function readCache(dir: string): CacheFile {
 		const parsed = JSON.parse(readFileSync(cacheFile(dir), "utf8")) as CacheFile;
 		if (parsed?.version === 1 && parsed.digests && typeof parsed.digests === "object") return parsed;
 	} catch {
-		// Missing or corrupt cache = cold start.
+		return { version: 1, digests: {} };
 	}
 	return { version: 1, digests: {} };
 }

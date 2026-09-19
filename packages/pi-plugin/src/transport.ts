@@ -153,7 +153,7 @@ export class Transport {
 			});
 			if (!res.ok) this.log(`http heartbeat failed: HTTP ${res.status}`);
 		} catch {
-			// Heartbeats are best-effort; transient HTTP failures just skip one beat.
+			return;
 		}
 	}
 
@@ -255,7 +255,7 @@ export class Transport {
 				try {
 					listener(msg);
 				} catch {
-					// A broken listener must not kill the socket or the other listeners.
+					this.log("digest listener failed");
 				}
 			}
 		}
