@@ -58,6 +58,14 @@ export default function (pi: ExtensionAPI): void {
 	let totalTurns = 0;
 	let injectedTurns = 0;
 
+	function resetTurnState(): void {
+		messagePosition = 0;
+		turns.reset();
+		lastTodoHash = "";
+		totalTurns = 0;
+		injectedTurns = 0;
+	}
+
 	function applyDigest(digest: MemoryDigestMessage): void {
 		// Diff against the cached revision (the last state this machine saw) so
 		// post-inspection pushes surface what was just mined, TASTE-row style.
@@ -73,7 +81,7 @@ export default function (pi: ExtensionAPI): void {
 	transport.onDigest((digest) => {
 		// A fetch reply echoes our sessionId; a post-inspection push carries none
 		// and only counts for the project this session already fetched.
-		if (digest.sessionId != null ? digest.sessionId !== sessionId : digest.projectId !== activeProjectId) return;
+		if (digest.sessionId == null ? digest.projectId !== activeProjectId : digest.sessionId !== sessionId) return;
 		applyDigest(digest);
 	});
 
@@ -166,16 +174,12 @@ export default function (pi: ExtensionAPI): void {
 		sessionId = id;
 		transport.connect();
 		startHeartbeat();
-		messagePosition = 0;
-		turns.reset();
-		lastTodoHash = "";
+		resetTurnState();
 		const identity = await gitIdentity(ctx.cwd);
 		// Cached digest injects immediately (offline included); the fetch below
 		// refreshes it once the server answers. activeKey scopes cache reads/writes.
 		activeKey = projectKey(identity.gitRemote, ctx.cwd);
 		activeProjectId = null;
-		totalTurns = 0;
-		injectedTurns = 0;
 		const cachedDigest = loadCachedDigest(agentDir(), activeKey);
 		if (cachedDigest) applyDigest(cachedDigest);
 		else {
@@ -195,6 +199,11 @@ export default function (pi: ExtensionAPI): void {
 		transport.send({ type: "memory_fetch", sessionId: id });
 		snapshotThrottle.reset();
 		await refreshProjectSnapshot(ctx.cwd, identity, true);
+	});
+
+	pi.on("session_tree", () => {
+		if (!sessionId) return;
+		resetTurnState();
 	});
 
 	pi.on("session_info_changed", (event) => {

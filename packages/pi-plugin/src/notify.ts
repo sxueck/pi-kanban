@@ -24,7 +24,7 @@ export function registerNotify(pi: ExtensionAPI): Notify {
 				detail: detail === undefined ? undefined : String(detail),
 			});
 		} catch {
-			// Pre-session or non-interactive modes: drop rather than break the caller.
+			return;
 		}
 	};
 }
