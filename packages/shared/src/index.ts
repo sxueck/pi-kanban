@@ -250,6 +250,13 @@ export interface MemoryDigestEntry {
 	scope?: MemoryScope;
 }
 
+/** Non-pinned project memories stop influencing prompts without deleting their history. */
+export const PROJECT_MEMORY_MAX_AGE_MS = 90 * 24 * 60 * 60_000;
+
+export function isCurrentProjectMemory(memory: Pick<MemoryDigestEntry, "scope" | "status" | "lastSeenAt">, now = Date.now()): boolean {
+	return memory.scope === "global" || memory.status === "pinned" || now - memory.lastSeenAt <= PROJECT_MEMORY_MAX_AGE_MS;
+}
+
 export interface MemoryDigestFinding {
 	kind: SessionFindingKind;
 	severity: SessionFindingSeverity;

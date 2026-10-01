@@ -9,7 +9,7 @@ import type {
 	SessionFindingKind,
 	SessionFindingSeverity,
 } from "@pi-kanban/shared";
-import { truncate } from "@pi-kanban/shared";
+import { isCurrentProjectMemory, truncate } from "@pi-kanban/shared";
 import { db } from "./db/index.js";
 import { projectFindings, projectMemories, projects, sessions } from "./db/schema.js";
 import { sendToMachine } from "./ws.js";
@@ -49,7 +49,7 @@ export interface DigestFindingRow {
 /**
  * Orders, caps, and hashes the digest payload. Pure so tests can run without a
  * DB: global principles first (pinned before confirmed, then recurrence and
- * recency), then project memories under the same rules; findings by
+ * recency), then current project memories under the same rules; findings by
  * severity then recency. Items past a cap or the byte budget are dropped whole.
  * The revision hashes only the content, so unchanged inputs keep one revision.
  */
@@ -60,8 +60,9 @@ export function buildDigestPayload(
 	globalMemoryRows: DigestMemoryRow[] = [],
 	now = Date.now(),
 ): Omit<MemoryDigestMessage, "type" | "projectId"> {
-	const rankMemories = (rows: DigestMemoryRow[]) => rows
-		.filter((row) => MEMORY_STATUS_RANK[row.status as ProjectMemoryStatus] !== undefined)
+	const rankMemories = (rows: DigestMemoryRow[], scope: "global" | "project") => rows
+		.filter((row) => MEMORY_STATUS_RANK[row.status as ProjectMemoryStatus] !== undefined
+			&& isCurrentProjectMemory({ status: row.status as ProjectMemoryStatus, scope, lastSeenAt: toMs(row.lastSeenAt) }, now))
 		.sort((a, b) =>
 			(MEMORY_STATUS_RANK[a.status as ProjectMemoryStatus] ?? UNRANKED) - (MEMORY_STATUS_RANK[b.status as ProjectMemoryStatus] ?? UNRANKED)
 			|| b.occurrenceCount - a.occurrenceCount
@@ -76,8 +77,8 @@ export function buildDigestPayload(
 		scope,
 	});
 	const memories: MemoryDigestEntry[] = [
-		...rankMemories(globalMemoryRows).slice(0, DIGEST_GLOBAL_MEMORY_LIMIT).map(toEntry("global")),
-		...rankMemories(memoryRows).slice(0, DIGEST_MEMORY_LIMIT).map(toEntry("project")),
+		...rankMemories(globalMemoryRows, "global").slice(0, DIGEST_GLOBAL_MEMORY_LIMIT).map(toEntry("global")),
+		...rankMemories(memoryRows, "project").slice(0, DIGEST_MEMORY_LIMIT).map(toEntry("project")),
 	].slice(0, DIGEST_MEMORY_LIMIT);
 	const findings: MemoryDigestFinding[] = findingRows
 		.sort((a, b) =>

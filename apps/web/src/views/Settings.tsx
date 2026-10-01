@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { InspectionProjectDTO, ModelSettingsDTO, ModelSettingsInput, UserDTO } from "@pi-kanban/shared";
 import { MIN_INSPECTION_SESSIONS } from "@pi-kanban/shared";
 import { apiErrorMessage, apiPost, useResource } from "../api.js";
+import { ErrorState, SkeletonRows } from "../components/states.js";
 import { useI18n } from "../i18n.js";
 import {
 	disableNotifications,
@@ -57,8 +58,11 @@ export function Settings() {
 
 	return (
 		<div className="account settings">
-			<header>
-				<h1 className="page-title">{t("settings.title")}</h1>
+			<header className="page-head">
+				<div>
+					<h1 className="page-title">{t("settings.title")}</h1>
+					<p>{t("settings.subtitle")}</p>
+				</div>
 			</header>
 			<section className="account-section">
 				<h2>{t("settings.appearance")}</h2>
@@ -227,9 +231,9 @@ function ModelSettingsSection() {
 			<h2>{t("settings.model.title")}</h2>
 			<p className="muted">{t("settings.model.hint")}</p>
 			{error ? (
-				<div className="error">{apiErrorMessage(error)}</div>
+				<ErrorState error={error} onRetry={() => setRefreshKey((k) => k + 1)} />
 			) : loading && !data ? (
-				<p className="muted">{t("common.loading")}</p>
+				<SkeletonRows count={5} />
 			) : (
 				<>
 					<form className="inline-form model-form" onSubmit={(event) => void save(event)}>
@@ -255,7 +259,7 @@ function ModelSettingsSection() {
 							aria-label={t("settings.model.apiKey")}
 							autoComplete="new-password"
 						/>
-						<button type="submit" disabled={busy}>{t("settings.model.save")}</button>
+						<button type="submit" disabled={busy}>{busy ? t("settings.model.saving") : t("settings.model.save")}</button>
 					</form>
 					<p className="muted">{t("settings.model.apiKeyHint")}</p>
 					{saveError && <p className="error">{saveError}</p>}
@@ -341,7 +345,7 @@ function ModelSettingsSection() {
 							{testError && <p className="error">{t("settings.model.testFailed")}: {testError}</p>}
 						</div>
 						<button type="button" disabled={busy} onClick={() => void testConnection()}>
-							{t("settings.model.test")}
+							{busy ? t("settings.model.testing") : t("settings.model.test")}
 						</button>
 					</div>
 				</>

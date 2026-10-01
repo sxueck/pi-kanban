@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { InspectionLogDetailDTO, InspectionLogSummaryDTO, InspectionStageEvent } from "@pi-kanban/shared";
-import { API_BASE, apiErrorMessage, fmtTime, getToken, useResource } from "../api.js";
+import { API_BASE, apiErrorMessage, fmtAgo, fmtTime, getToken, useResource } from "../api.js";
 import { useI18n } from "../i18n.js";
 import type { MsgKey } from "../i18n.js";
 
@@ -29,11 +29,12 @@ interface RunEnvelope {
  * response) plus a live SSE stage timeline while a run is in flight.
  */
 export function InspectionLogPanel({ projectId, onClose }: { projectId: number; onClose: () => void }) {
-	const { t } = useI18n();
+	const { t, locale } = useI18n();
 	const [refreshKey, setRefreshKey] = useState(0);
 	const [selected, setSelected] = useState<string | null>(null);
 	const [stages, setStages] = useState<InspectionStageEvent[]>([]);
 	const [run, setRun] = useState<RunEnvelope | null>(null);
+	const [streamDown, setStreamDown] = useState(false);
 	const [liveText, setLiveText] = useState<LiveText>({ reasoning: "", content: "" });
 	// Deltas accumulate here and flush to state on a 100ms cadence: a re-render
 	// per token would thrash React at provider chunk rates.
@@ -93,6 +94,10 @@ export function InspectionLogPanel({ projectId, onClose }: { projectId: number; 
 		source.addEventListener("stage", onStage as EventListener);
 		source.addEventListener("snapshot", onSnapshot as EventListener);
 		source.addEventListener("delta", onDelta as EventListener);
+		// EventSource reconnects on its own; surface the gap so a frozen timeline
+		// is never mistaken for a stalled inspection.
+		source.addEventListener("error", () => setStreamDown(true));
+		source.addEventListener("open", () => setStreamDown(false));
 		return () => source.close();
 	}, [projectId]);
 
@@ -107,12 +112,55 @@ export function InspectionLogPanel({ projectId, onClose }: { projectId: number; 
 		if (selected == null && logs != null && logs.length > 0) setSelected(logs[0].inspectionId);
 	}, [logs, selected]);
 
+	const panelRef = useRef<HTMLElement | null>(null);
+	useEffect(() => {
+		// A modal you cannot leave from the keyboard is a trap: Escape closes, focus
+		// starts inside, Tab cycles within, and the opener is restored on the way out.
+		const opener = document.activeElement as HTMLElement | null;
+		panelRef.current?.focus();
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.key === "Escape") {
+				event.stopPropagation();
+				onClose();
+				return;
+			}
+			if (event.key !== "Tab") return;
+			const panel = panelRef.current;
+			if (!panel) return;
+			const items = panel.querySelectorAll<HTMLElement>("button, [href], input, select, summary, [tabindex]:not([tabindex='-1'])");
+			if (items.length === 0) return;
+			const first = items[0];
+			const last = items[items.length - 1];
+			if (event.shiftKey && document.activeElement === first) {
+				event.preventDefault();
+				last.focus();
+			} else if (!event.shiftKey && document.activeElement === last) {
+				event.preventDefault();
+				first.focus();
+			}
+		};
+		document.addEventListener("keydown", onKeyDown, true);
+		return () => {
+			document.removeEventListener("keydown", onKeyDown, true);
+			opener?.focus?.();
+		};
+	}, [onClose]);
+
 	return (
-		<div className="log-panel-overlay" onClick={onClose} role="presentation">
-			<section className="log-panel" onClick={(event) => event.stopPropagation()} aria-label={t("logs.title")}>
+		<div className="log-panel-overlay" onClick={onClose}>
+			<section
+				className="log-panel"
+				ref={panelRef}
+				role="dialog"
+				aria-modal="true"
+				aria-label={t("logs.title")}
+				tabIndex={-1}
+				onClick={(event) => event.stopPropagation()}
+			>
 				<header className="log-panel-head">
 					<h2>{t("logs.title")}</h2>
 					{run?.running && <span className="state state-running">{t("logs.liveRunning")}</span>}
+					{streamDown && run?.running && <span className="state state-error">{t("logs.streamDown")}</span>}
 					<button type="button" className="log-panel-close" onClick={onClose} aria-label={t("logs.close")}>
 						✕
 					</button>
@@ -133,11 +181,11 @@ export function InspectionLogPanel({ projectId, onClose }: { projectId: number; 
 											className={selected === log.inspectionId ? "is-selected" : ""}
 											onClick={() => setSelected(log.inspectionId)}
 										>
-											<span className={`status-${log.status}`}>{t(`logs.trigger.${log.trigger}` as MsgKey)}</span>
-											<span>{fmtTime(log.startedAt)}</span>
-											<span className={`state status-${log.status === "done" ? "finished" : log.status === "failed" ? "error" : "running"}`}>
+											<span className={`state ${logStatusClass(log.status)}`}>
 												{t(`logs.status.${log.status}` as MsgKey)}
 											</span>
+											<span className="log-run-time" title={fmtTime(log.startedAt)}>{fmtAgo(log.startedAt, locale)}</span>
+											<span className="log-run-trigger">{t(`logs.trigger.${log.trigger}` as MsgKey)}</span>
 										</button>
 									</li>
 								))}
@@ -169,6 +217,13 @@ export function InspectionLogPanel({ projectId, onClose }: { projectId: number; 
 }
 
 /** Live-streamed model text blocks: reasoning and output as they arrive. */
+function logStatusClass(status: string): string {
+	if (status === "succeeded" || status === "done") return "state-finished";
+	if (status === "failed") return "state-error";
+	if (status === "running") return "state-running";
+	return "state-offline";
+}
+
 export function LiveStreamBlocks({ liveText }: { liveText: LiveText }) {
 	const { t } = useI18n();
 	if (!liveText.reasoning && !liveText.content) return null;
@@ -214,7 +269,7 @@ function LogSection({ title, text }: { title: string; text: string }) {
 		<details className="log-section" open>
 			<summary>
 				{title}
-				<span className="muted">{truncated ? t("logs.truncated") : `${text.length} chars`}</span>
+				<span className="muted">{truncated ? t("logs.truncated") : t("logs.chars", { n: text.length })}</span>
 			</summary>
 			<pre>{truncated ? `${text.slice(0, MAX_RENDER_CHARS)}\n…` : text}</pre>
 		</details>

@@ -10,14 +10,15 @@ import type {
 	ProjectTreeNodeDTO,
 	ProjectWorkDTO,
 	SessionFindingDTO,
-	SessionFindingKind,
 } from "@pi-kanban/shared";
 import { MIN_INSPECTION_SESSIONS } from "@pi-kanban/shared";
-import { apiDelete, apiDownload, apiErrorMessage, apiPost, fmtCost, fmtTime, useResource } from "../api.js";
+import { apiDelete, apiDownload, apiErrorMessage, apiPost, fmtAgo, fmtCost, fmtTime, fmtUntil, useResource } from "../api.js";
 import { useI18n } from "../i18n.js";
 import type { MsgKey } from "../i18n.js";
 import { InspectionLogPanel } from "./InspectionLogs.js";
 import { EmptyHistoryIllustration } from "../components/illustrations.js";
+import { EmptyState, ErrorState, Skeleton, SkeletonCards, SkeletonRows } from "../components/states.js";
+import { StateIcon } from "../components/icons.js";
 
 const EMPTY_PROJECT_COVERAGE: ProjectWorkDTO["coverage"] = {
 	totalFiles: 0,
@@ -59,33 +60,46 @@ export function partitionProjectTree(treeNodes: ProjectTreeNodeDTO[]) {
 }
 
 export function History() {
-	const { t } = useI18n();
-	const { data, error, loading } = useResource<ProjectHistoryDTO[]>("/api/history");
+	const { t, locale } = useI18n();
+	const [refreshKey, setRefreshKey] = useState(0);
+	const { data, error, loading } = useResource<ProjectHistoryDTO[]>("/api/history", refreshKey);
 	const projects = data ?? [];
 	return (
 		<div className="history">
-			<header>
-				<h1 className="page-title">{t("history.title")}</h1>
-			</header>
-			{error && <div className="error">{apiErrorMessage(error)}</div>}
-			{loading && !data && <div className="empty">{t("common.loading")}</div>}
-			{data && projects.length === 0 && (
-				<div className="empty">
-					<EmptyHistoryIllustration />
-					<h2>{t("history.empty")}</h2>
-					<p>{t("history.emptyHint")}</p>
+			<header className="page-head">
+				<div>
+					<p className="page-eyebrow">{t("nav.history")}</p>
+					<h1 className="page-title">{t("history.title")}</h1>
+					<p>{t("history.subtitle")}</p>
 				</div>
+			</header>
+			{error && <ErrorState error={error} onRetry={() => setRefreshKey((k) => k + 1)} />}
+			{loading && !data && <SkeletonCards count={6} min={3} />}
+			{data && projects.length === 0 && (
+				<EmptyState
+					illustration={<EmptyHistoryIllustration />}
+					title={t("history.empty")}
+					hint={t("history.emptyHint")}
+				/>
 			)}
 			<div className="cards">
-				{projects.map((p) => (
-					<Link key={p.id} to={`/history/project/${p.id}`} className="card project-card">
+				{projects.map((p, i) => (
+					<Link
+						key={p.id}
+						to={`/history/project/${p.id}`}
+						className="card project-card"
+						style={{ "--i": i } as React.CSSProperties}
+					>
 						<div className="card-title">{p.name}</div>
-						{p.gitRemote && <div className="mono muted">{p.gitRemote}</div>}
+						{p.gitRemote && <div className="mono muted project-remote">{p.gitRemote}</div>}
 						<div className="card-meta">
 							<span>{t("history.sessions", { n: p.sessionCount })}</span>
 							<span>{fmtCost(p.totalCostUsd)}</span>
-							{p.lastActivityAt && <span>{t("history.last", { time: fmtTime(p.lastActivityAt) })}</span>}
+							{p.lastActivityAt && (
+								<span title={fmtTime(p.lastActivityAt)}>{t("history.last", { time: fmtAgo(p.lastActivityAt, locale) })}</span>
+							)}
 						</div>
+						<span className="card-go" aria-hidden="true">→</span>
 					</Link>
 				))}
 			</div>
@@ -94,7 +108,7 @@ export function History() {
 }
 
 export function ProjectSessions() {
-	const { t } = useI18n();
+	const { t, locale } = useI18n();
 	const navigate = useNavigate();
 	const [refreshKey, setRefreshKey] = useState(0);
 	const [memoryFilter, setMemoryFilter] = useState<ProjectMemoryStatus | "all">("all");
@@ -157,7 +171,7 @@ export function ProjectSessions() {
 	}
 
 	async function clearEmptySessions() {
-		if (!id || !window.confirm("清空当前项目中过期的未命名空会话？")) return;
+		if (!id || !window.confirm(t("sessions.clearEmptyConfirm"))) return;
 		setActionError(null);
 		try {
 			await apiPost(`/api/projects/${id}/clear-empty-sessions`, {});
@@ -168,7 +182,7 @@ export function ProjectSessions() {
 	}
 
 	async function deleteProject() {
-		if (!id || !window.confirm("删除项目后将从项目列表隐藏；新的会话上报会自动恢复它。是否继续？")) return;
+		if (!id || !window.confirm(t("sessions.deleteConfirm"))) return;
 		setActionError(null);
 		try {
 			await apiDelete(`/api/projects/${id}`);
@@ -181,62 +195,73 @@ export function ProjectSessions() {
 	return (
 		<div className="board-layout project-detail">
 			<div className="board-main">
-				<header>
-					<div>
-						<h1 className="page-title">{t("sessions.title")}</h1>
-						{work && <p className="muted">{work.project.name}</p>}
-					</div>
+				<header className="page-head">
+				<div>
+					<p className="page-eyebrow"><Link to="/history">{t("nav.history")}</Link></p>
+					<h1 className="page-title">{work ? work.project.name : t("sessions.title")}</h1>
 					{work && (
-						<div className="project-maintenance">
-							<button type="button" className="secondary" onClick={() => void clearEmptySessions()}>清空异常会话</button>
-							<button type="button" className="danger" onClick={() => void deleteProject()}>删除项目</button>
-						</div>
+						<p>
+							{t("sessions.count", { n: sessions?.length ?? 0 })}
+							{work.project.gitRemote && <> · <span className="mono">{work.project.gitRemote}</span></>}
+						</p>
 					)}
-				</header>
-				{sessionsError && <div className="error">{apiErrorMessage(sessionsError)}</div>}
-				<div className={`project-work-main${work ? " has-tree" : ""}`}>
-					{work && <TreeCard nodes={structureNodes} coverage={coverage} selectedNodeId={selectedModule?.id} onSelect={setSelectedModuleId} />}
-					<div className="project-sessions">
-						{!sessionsError && !sessions && <div className="empty">{t("common.loading")}</div>}
-						{sessions && sessions.length === 0 && (
-							<div className="empty">
-								<h2>{t("sessions.empty")}</h2>
-								<p>{t("sessions.emptyHint")}</p>
-							</div>
-						)}
-						{sessions && sessions.length > 0 && (
-							<table className="table">
-								<thead>
-									<tr>
-										<th>{t("th.title")}</th>
-										<th>{t("th.state")}</th>
-										<th>{t("th.turns")}</th>
-										<th>{t("th.cost")}</th>
-										<th>{t("th.started")}</th>
-									</tr>
-								</thead>
-								<tbody>
-									{sessions.map((s) => (
-										<tr key={s.id}>
-											<td>
-												<Link to={`/sessions/${s.id}`} title={s.title ?? s.id}>{s.title ?? t("board.untitled")}</Link>
-											</td>
-											<td className={`status-${s.state} nowrap`}>{t(`state.${s.state}` as MsgKey)}</td>
-											<td className="nowrap">{s.turnCount}</td>
-											<td className="nowrap">{fmtCost(s.totalCostUsd)}</td>
-											<td className="nowrap">{fmtTime(s.startedAt)}</td>
-										</tr>
-									))}
-								</tbody>
-							</table>
-						)}
+				</div>
+				{work && (
+					<div className="project-maintenance">
+						<button type="button" className="secondary" onClick={() => void clearEmptySessions()}>{t("sessions.clearEmpty")}</button>
+						<button type="button" className="danger" onClick={() => void deleteProject()}>{t("sessions.delete")}</button>
 					</div>
+				)}
+			</header>
+			{sessionsError && <ErrorState error={sessionsError} onRetry={() => setRefreshKey((k) => k + 1)} />}
+			{actionError && <ErrorState error={actionError} />}
+			<div className={`project-work-main${work ? " has-tree" : ""}`}>
+				{work && <TreeCard nodes={structureNodes} coverage={coverage} selectedNodeId={selectedModule?.id} onSelect={setSelectedModuleId} />}
+				<div className="project-sessions">
+					{!sessionsError && !sessions && <SkeletonRows count={6} />}
+					{sessions && sessions.length === 0 && (
+						<EmptyState title={t("sessions.empty")} hint={t("sessions.emptyHint")} />
+					)}
+					{sessions && sessions.length > 0 && (
+						<table className="table">
+							<caption className="sr-only">{t("sessions.title")}</caption>
+							<thead>
+								<tr>
+									<th scope="col">{t("th.title")}</th>
+									<th scope="col">{t("th.state")}</th>
+									<th scope="col">{t("th.turns")}</th>
+									<th scope="col">{t("th.cost")}</th>
+									<th scope="col">{t("th.started")}</th>
+								</tr>
+							</thead>
+							<tbody>
+								{sessions.map((s) => (
+									<tr key={s.id}>
+										<td>
+											<Link to={`/sessions/${s.id}`} title={s.title ?? s.id}>{s.title ?? t("board.untitled")}</Link>
+										</td>
+										<td className={`state-cell is-${s.state} nowrap`}>
+											<StateIcon state={s.state} />{t(`state.${s.state}` as MsgKey)}
+										</td>
+										<td className="nowrap">{s.turnCount}</td>
+										<td className="nowrap">{fmtCost(s.totalCostUsd)}</td>
+										<td className="nowrap" title={fmtTime(s.startedAt)}>{fmtAgo(s.startedAt, locale)}</td>
+									</tr>
+								))}
+							</tbody>
+						</table>
+					)}
 				</div>
 			</div>
-			<aside className="board-rail">
-				{workError && <div className="error">{apiErrorMessage(workError)}</div>}
-				{!workError && !work && <div className="empty">{t("common.loading")}</div>}
-				{actionError && <div className="error">{actionError}</div>}
+		</div>
+		<aside className="board-rail" aria-busy={!work && !workError}>
+			{workError && <ErrorState error={workError} onRetry={() => setRefreshKey((k) => k + 1)} />}
+			{!workError && !work && (
+				<div className="rail-group" aria-hidden="true">
+					<Skeleton style={{ height: 130, borderRadius: "var(--radius)" }} />
+					<Skeleton style={{ height: 240, borderRadius: "var(--radius)" }} />
+				</div>
+			)}
 				{work && (
 					<div className="rail-group">
 					<InspectionCard
@@ -282,15 +307,20 @@ export function InspectionCard({ inspection, busy, onInspect, onLogs }: {
 	onLogs: () => void;
 }) {
 	const { t, locale } = useI18n();
+	const failed = Boolean(inspection.lastError) && !inspection.running;
 	const statusClass = inspection.running
 		? "state-running"
-		: inspection.enabled && !inspection.excluded ? "state-idle" : "state-offline";
+		: failed
+			? "state-error"
+			: inspection.enabled && !inspection.excluded ? "state-idle" : "state-offline";
 	const statusLabel = inspection.running
 		? t("work.inspectRunning")
 		: inspection.excluded
 			? t("work.inspection.excluded")
 			: inspection.enabled
-				? t("work.inspection.enabled")
+				? failed
+					? t("work.inspection.failed")
+					: t("work.inspection.enabled")
 				: t("work.inspection.disabled");
 	return (
 		<section className="rail-card rail-group-item inspection-card">
@@ -299,8 +329,13 @@ export function InspectionCard({ inspection, busy, onInspect, onLogs }: {
 			</header>
 			<span className={`state ${statusClass}`}>{statusLabel}</span>
 			<div className="card-meta">
-				{inspection.enabled && !inspection.excluded && inspection.nextRunAt && (
-					<span>{relativeTime(inspection.nextRunAt, locale)}</span>
+				{inspection.lastRunAt ? (
+					<span title={fmtTime(inspection.lastRunAt)}>{t("work.inspection.last", { time: fmtAgo(inspection.lastRunAt, locale) })}</span>
+				) : (
+					<span>{t("work.inspection.never")}</span>
+				)}
+				{inspection.enabled && !inspection.excluded && !inspection.running && inspection.nextRunAt && (
+					<span title={fmtTime(inspection.nextRunAt)}>{t("work.inspection.next", { time: fmtUntil(inspection.nextRunAt, locale) })}</span>
 				)}
 			</div>
 			{!inspection.enabled && <p className="muted work-hint">{t("work.inspection.disabledHint")}</p>}
@@ -322,18 +357,18 @@ export function InspectionCard({ inspection, busy, onInspect, onLogs }: {
 	);
 }
 
-function relativeTime(timestamp: number, locale: "zh" | "en"): string {
-	const minutes = Math.max(0, Math.round((timestamp - Date.now()) / 60_000));
-	if (minutes < 1) return locale === "zh" ? "即将执行" : "due now";
-	const [value, unit] = minutes >= 1440 ? [Math.round(minutes / 1440), "day"] : minutes >= 60 ? [Math.round(minutes / 60), "hour"] : [minutes, "minute"];
-	return new Intl.RelativeTimeFormat(locale === "zh" ? "zh-CN" : "en-US", { numeric: "auto" }).format(value, unit as Intl.RelativeTimeFormatUnit);
-}
 
-const FINDING_KIND_ORDER: SessionFindingKind[] = ["direction_conflict", "intent_drift", "context_gap", "tool_misuse", "model_error"];
+
+const SEVERITY_ORDER = { error: 0, warning: 1, info: 2 } as const;
 
 export function FindingsCard({ findings, memories = [] }: { findings: SessionFindingDTO[]; memories?: ProjectMemoryDTO[] }) {
 	const { t } = useI18n();
 	const memoryById = new Map(memories.map((memory) => [memory.id, memory]));
+	// One severity-first list: five ALL-CAPS group headers in a 320px rail bury
+	// the two findings that actually matter.
+	const ordered = [...findings].sort(
+		(a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || b.lastSeenAt - a.lastSeenAt,
+	);
 	return (
 		<section className={`board-section rail-group-item memories-section findings-section${findings.length === 0 ? " is-empty" : ""}`}>
 			<header>
@@ -344,34 +379,23 @@ export function FindingsCard({ findings, memories = [] }: { findings: SessionFin
 				<p className="muted">{t("work.findings.empty")}</p>
 			) : (
 				<div className="memory-scroll">
-				{FINDING_KIND_ORDER.map((kind) => {
-					const items = findings.filter((finding) => finding.kind === kind);
-					if (items.length === 0) return null;
-					return (
-						<div key={kind} className="memory-group">
-							<h3 className="memory-group-title">
-								{t(`finding.kind.${kind}` as MsgKey)}
-							<span className="count">{items.length}</span>
-						</h3>
-						<ul className="memory-list">
-							{items.map((finding) => (
-								<FindingItem key={finding.id} finding={finding} memoryById={memoryById} />
-							))}
-						</ul>
-					</div>
-				);
-				})}
-			</div>
-		)}
-	</section>
+					<ul className="memory-list">
+						{ordered.map((finding) => (
+							<FindingItem key={finding.id} finding={finding} memoryById={memoryById} />
+						))}
+					</ul>
+				</div>
+			)}
+		</section>
 	);
 }
 
 function FindingItem({ finding, memoryById }: { finding: SessionFindingDTO; memoryById: Map<string, ProjectMemoryDTO> }) {
-	const { t } = useI18n();
+	const { t, locale } = useI18n();
 	return (
 		<li className={`insight-item severity-${finding.severity}`}>
 			<div className="insight-head">
+				<span className="finding-kind">{t(`finding.kind.${finding.kind}` as MsgKey)}</span>
 				{finding.sessionId ? (
 					<Link className="insight-label" to={`/sessions/${finding.sessionId}`} title={finding.sessionId}>
 						{finding.summary}
@@ -394,8 +418,8 @@ function FindingItem({ finding, memoryById }: { finding: SessionFindingDTO; memo
 				</div>
 			)}
 			<div className="memory-meta">
-				{fmtTime(finding.createdAt)}
-				{finding.occurrenceCount > 1 && <> · {t("finding.seen", { n: finding.occurrenceCount })} · {t("finding.lastSeen", { time: fmtTime(finding.lastSeenAt) })}</>}
+				<span title={fmtTime(finding.createdAt)}>{fmtAgo(finding.createdAt, locale)}</span>
+				{finding.occurrenceCount > 1 && <> · {t("finding.seen", { n: finding.occurrenceCount })} · {t("finding.lastSeen", { time: fmtAgo(finding.lastSeenAt, locale) })}</>}
 			</div>
 		</li>
 	);
@@ -467,8 +491,11 @@ export function MemoriesCard({ memories, insights, projectId, pending, filter, o
 				</button>
 			</header>
 			{exportError && <div className="error" role="alert">{exportError}</div>}
-			{memories.length === 0 ? (
-				<p className="muted">{t("work.memory.empty")}</p>
+			{memories.length === 0 && insights.length === 0 ? (
+				<div className="empty-inline">
+					<p>{t("work.memory.empty")}</p>
+					<p className="work-hint">{t("work.memory.emptyHint")}</p>
+				</div>
 			) : (
 				<>
 					<div className="board-chips" role="group" aria-label={t("work.memory.filter")}>
@@ -487,7 +514,7 @@ export function MemoriesCard({ memories, insights, projectId, pending, filter, o
 					</div>
 					<div className="memory-scroll">
 						{filtered.length === 0 && insights.length === 0 ? (
-							<p className="muted">{t("work.memory.empty")}</p>
+							<p className="muted">{t("work.memory.emptyFiltered")}</p>
 						) : (
 							<>
 							{groups.map((group) => (

@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import type { SearchScope, SearchResultDTO } from "@pi-kanban/shared";
-import { apiErrorMessage, fmtTime, useResource } from "../api.js";
+import { fmtAgo, useResource } from "../api.js";
 import { useI18n } from "../i18n.js";
+import { EmptyState, ErrorState, SkeletonRows } from "../components/states.js";
 
 const SCOPES: SearchScope[] = ["all", "sessions", "memories"];
 
@@ -12,57 +13,66 @@ const SCOPES: SearchScope[] = ["all", "sessions", "memories"];
  * a local-session concern (the hint line points at session_search).
  */
 export function Search() {
-	const { t } = useI18n();
+	const { t, locale } = useI18n();
 	const [query, setQuery] = useState("");
 	const [submitted, setSubmitted] = useState("");
 	const [scope, setScope] = useState<SearchScope>("all");
+	const [refreshKey, setRefreshKey] = useState(0);
 	const path = submitted ? `/api/search?q=${encodeURIComponent(submitted)}&scope=${scope}` : null;
-	const { data, error, loading } = useResource<SearchResultDTO>(path);
+	const { data, error, loading } = useResource<SearchResultDTO>(path, refreshKey);
 	const results = data;
+	// Scores are BM25-ish and unbounded: show them as a bar relative to the best hit.
+	const top = Math.max(1, ...(results ? [...results.sessions, ...results.memories].map((h) => h.score) : []));
 
 	return (
-		<div className="history search-view">
-			<header>
-				<h1 className="page-title">{t("search.title")}</h1>
-				<form
-					className="search-form"
-					onSubmit={(event) => {
-						event.preventDefault();
-						setSubmitted(query.trim());
-					}}
-				>
-					<input
-						autoFocus
-						value={query}
-						placeholder={t("search.placeholder")}
-						onChange={(event) => setQuery(event.target.value)}
-					/>
-					<div className="board-chips" role="group">
-						{SCOPES.map((value) => (
-							<button
-								key={value}
-								type="button"
-								className={scope === value ? "on" : ""}
-								aria-pressed={scope === value}
-								onClick={() => setScope(value)}
-							>
-								{t(`search.scope.${value}`)}
-							</button>
-						))}
-					</div>
-					<button type="submit" disabled={!query.trim() || loading}>
-						{t("search.submit")}
-					</button>
-				</form>
-				<p className="muted search-hint">{t("search.hint")}</p>
-			</header>
-			{error && <div className="error">{apiErrorMessage(error)}</div>}
-			{loading && !results && <div className="empty">{t("common.loading")}</div>}
-			{results && results.sessions.length === 0 && results.memories.length === 0 && (
-				<div className="empty">
-					<h2>{t("search.empty")}</h2>
+		<div className="search-view">
+			<header className="page-head">
+				<div>
+					<h1 className="page-title">{t("search.title")}</h1>
+					<p>{t("search.subtitle")}</p>
 				</div>
-			)}
+			</header>
+			<form
+				className="search-form"
+				onSubmit={(event) => {
+					event.preventDefault();
+					setSubmitted(query.trim());
+				}}
+			>
+				<label className="field">
+					<span className="sr-only">{t("search.placeholder")}</span>
+					<input autoFocus value={query} placeholder={t("search.placeholder")} onChange={(event) => setQuery(event.target.value)} />
+				</label>
+				<div className="board-chips" role="group" aria-label={t("search.scopeLabel")}>
+					{SCOPES.map((value) => (
+						<button
+							key={value}
+							type="button"
+							className={scope === value ? "on" : ""}
+							aria-pressed={scope === value}
+							onClick={() => setScope(value)}
+						>
+							{t(`search.scope.${value}`)}
+						</button>
+					))}
+				</div>
+				<button type="submit" disabled={!query.trim() || loading}>
+					{t("search.submit")}
+				</button>
+			</form>
+			<div aria-live="polite">
+				{!path && (
+					<EmptyState
+						title={t("search.start")}
+						hint={t("search.hint")}
+					/>
+				)}
+				{error && <ErrorState error={error} onRetry={() => setRefreshKey((k) => k + 1)} />}
+				{path && loading && !results && <SkeletonRows count={4} />}
+				{results && results.sessions.length === 0 && results.memories.length === 0 && (
+					<EmptyState title={t("search.empty")} hint={t("search.hint")} />
+				)}
+			</div>
 			{results && results.sessions.length > 0 && (
 				<section className="board-section search-section">
 					<header>
@@ -76,13 +86,15 @@ export function Search() {
 									<Link className="search-hit-link" to={`/sessions/${hit.sessionId}`} title={hit.sessionId}>
 										{hit.title ?? `#${hit.sessionId.slice(0, 8)}`}
 									</Link>
-									<span className="muted">{hit.projectName}</span>
-									<span className="search-score">{hit.score.toFixed(2)}</span>
+										<span className="muted">{hit.projectName}</span>
+										<span className="search-score" title={t("search.relevance", { n: hit.score.toFixed(2) })}>
+											<span className="score-bar" style={{ "--p": `${Math.round((hit.score / top) * 100)}%` } as React.CSSProperties} />
+										</span>
 								</div>
 								{hit.snippet && <p className="work-detail">…{hit.snippet}</p>}
 								<div className="memory-meta">
-									{fmtTime(hit.matchedAt)}
-									{hit.turnPosition != null && <> · turn {hit.turnPosition}</>}
+									{fmtAgo(hit.matchedAt, locale)}
+									{hit.turnPosition != null && <> · {t("search.turn", { n: hit.turnPosition })}</>}
 								</div>
 							</li>
 						))}
@@ -110,11 +122,13 @@ export function Search() {
 									) : (
 										<span className="muted">{hit.projectName}</span>
 									)}
-									<span className="search-score">{hit.score.toFixed(2)}</span>
+									<span className="search-score" title={t("search.relevance", { n: hit.score.toFixed(2) })}>
+										<span className="score-bar" style={{ "--p": `${Math.round((hit.score / top) * 100)}%` } as React.CSSProperties} />
+									</span>
 								</div>
 								<p className="memory-content">{hit.content}</p>
 								<div className="memory-meta">
-									{t(`memory.status.${hit.status}`)} · {fmtTime(hit.lastSeenAt)}
+									{t(`memory.status.${hit.status}`)} · {fmtAgo(hit.lastSeenAt, locale)}
 								</div>
 							</li>
 						))}

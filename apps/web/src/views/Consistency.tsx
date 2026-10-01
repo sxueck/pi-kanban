@@ -8,9 +8,10 @@ import type {
 	ProjectMemoryKind,
 	ProjectMemoryStatus,
 } from "@pi-kanban/shared";
-import { apiErrorMessage, apiPost, fmtTime, useResource } from "../api.js";
+import { apiErrorMessage, apiPost, fmtAgo, fmtTime, useResource } from "../api.js";
 import { useI18n } from "../i18n.js";
 import type { MsgKey } from "../i18n.js";
+import { ErrorState, Skeleton, SkeletonRows } from "../components/states.js";
 
 const MEMORY_KINDS: ProjectMemoryKind[] = ["decision", "preference", "fact", "pattern", "issue"];
 
@@ -43,15 +44,15 @@ export function Consistency() {
 	return (
 		<div className="board-layout consistency-view">
 			<div className="board-main">
-				<header>
+				<header className="page-head">
 					<div>
 						<h1 className="page-title">{t("consistency.title")}</h1>
-						<p className="muted">{t("consistency.subtitle")}</p>
+						<p>{t("consistency.subtitle")}</p>
 					</div>
 				</header>
-				{error && <div className="error">{apiErrorMessage(error)}</div>}
-				{loading && !data && <div className="empty">{t("common.loading")}</div>}
-				{actionError && <div className="error">{actionError}</div>}
+				{error && <ErrorState error={error} onRetry={() => setRefreshKey((key) => key + 1)} />}
+				{loading && !data && <SkeletonRows count={4} />}
+				{actionError && <ErrorState error={actionError} />}
 				{global && (
 					<div className="project-work-main">
 						<div className="project-sessions consistency-main">
@@ -74,8 +75,8 @@ export function Consistency() {
 					</div>
 				)}
 			</div>
-			<aside className="board-rail">
-				{global && (
+			<aside className="board-rail" aria-busy={loading && !data}>
+				{global ? (
 					<div className="rail-group">
 						<AuditCard
 							state={global.state}
@@ -89,6 +90,11 @@ export function Consistency() {
 							onChanged={() => setRefreshKey((key) => key + 1)}
 						/>
 					</div>
+				) : (
+					<div className="rail-group" aria-hidden="true">
+						<Skeleton style={{ height: 120, borderRadius: "var(--radius)" }} />
+						<Skeleton style={{ height: 220, borderRadius: "var(--radius)" }} />
+					</div>
 				)}
 			</aside>
 		</div>
@@ -101,33 +107,43 @@ function AuditCard({ state, runs, busy, onRun }: {
 	busy: boolean;
 	onRun: () => void;
 }) {
-	const { t } = useI18n();
+	const { t, locale } = useI18n();
+	const failed = Boolean(state.lastError) && !state.running;
+	const statusClass = state.running ? "state-running" : failed ? "state-error" : state.lastRunAt ? "state-idle" : "state-offline";
+	const statusLabel = state.running
+		? t("consistency.running")
+		: failed
+			? t("consistency.failed")
+			: state.lastRunAt
+				? t("consistency.idle")
+				: t("consistency.never");
+	const canRun = state.eligibleProjects >= 2;
 	return (
 		<section className="rail-card rail-group-item inspection-card">
 			<header>
 				<h2>{t("consistency.runs")}</h2>
 			</header>
-			<span className={`state ${state.running ? "state-running" : "state-idle"}`}>
-				{state.running ? t("consistency.running") : t("consistency.never")}
-			</span>
+			<span className={`state ${statusClass}`}>{statusLabel}</span>
 			<div className="card-meta">
 				<span>{t("consistency.corpusHint", { n: state.eligibleProjects })}</span>
-				{!state.running && state.lastRunAt && <span>{t("consistency.lastRun", { time: fmtTime(state.lastRunAt) })}</span>}
+				{state.lastRunAt && <span title={fmtTime(state.lastRunAt)}>{t("consistency.lastRun", { time: fmtAgo(state.lastRunAt, locale) })}</span>}
 			</div>
-			{!state.running && state.lastError && <p className="error work-hint">{t("consistency.lastError")}: {state.lastError}</p>}
+			{failed && <p className="error work-hint">{state.lastError}</p>}
+			{!canRun && <p className="muted work-hint">{t("consistency.needCorpus")}</p>}
 			<div className="inspection-actions">
-				<button type="button" disabled={busy || state.running} onClick={onRun}>
+				<button type="button" disabled={busy || state.running || !canRun} onClick={onRun}>
 					{state.running || busy ? t("consistency.running") : t("consistency.run")}
 				</button>
 			</div>
-			{state.eligibleProjects < 2 && <p className="muted work-hint">{t("consistency.needCorpus")}</p>}
 			{runs.length > 0 && (
 				<ul className="memory-list audit-run-list">
 					{runs.slice(0, 5).map((run) => (
 						<li key={run.inspectionId} className="insight-item">
 							<div className="insight-head">
-								<span className={`work-kind run-status-${run.status}`}>{run.status}</span>
-								<span className="insight-label">{fmtTime(run.startedAt)} · {run.trigger}</span>
+								<span className={`run-status run-status-${run.status}`} title={run.error}>{t(`logs.status.${run.status}` as MsgKey)}</span>
+								<span className="insight-label" title={fmtTime(run.startedAt)}>
+									{fmtAgo(run.startedAt, locale)} · {t(`logs.trigger.${run.trigger}` as MsgKey)}
+								</span>
 							</div>
 							{run.error && <p className="work-detail">{run.error}</p>}
 						</li>
@@ -191,7 +207,7 @@ function GlobalMemoriesCard({ memories, onError, onChanged }: {
 						<option key={value} value={value}>{t(`memory.kind.${value}`)}</option>
 					))}
 				</select>
-				<input value={content} placeholder={t("consistency.addContent")} onChange={(event) => setContent(event.target.value)} maxLength={600} />
+				<input value={content} placeholder={t("consistency.addContent")} aria-label={t("consistency.addContent")} onChange={(event) => setContent(event.target.value)} maxLength={600} />
 				<button type="button" disabled={!content.trim() || creating} onClick={() => void create()}>
 					{t("consistency.create")}
 				</button>
@@ -321,7 +337,7 @@ function FindingsSection({ title, findings, memories, resolvable, onError, onCha
 			)}
 			{closed.length > 0 && (
 				<details className="closed-findings">
-					<summary>{t("consistency.resolved")}/{t("consistency.dismissed")} · {closed.length}</summary>
+					<summary>{t("consistency.closed", { n: closed.length })}</summary>
 					<ul className="memory-list">
 						{closed.map(({ finding, projectId, projectName }) => (
 							<FindingRow
@@ -353,11 +369,11 @@ function FindingRow({ finding, projectId, projectName, memoryById, resolvable, d
 	pending: boolean;
 	onResolve: (id: number, resolution: GlobalFindingDTO["resolution"]) => void;
 }) {
-	const { t } = useI18n();
+	const { t, locale } = useI18n();
 	return (
 		<li className={`insight-item severity-${finding.severity}${dimmed ? " is-closed" : ""}`}>
 			<div className="insight-head">
-				<span className="work-kind">{t("finding.kind.direction_conflict")}</span>
+				<span className="finding-kind">{t("finding.kind.direction_conflict")}</span>
 				<span className="insight-label">{finding.summary}</span>
 				{finding.resolution === "resolved" && <span className="work-kind">{t("consistency.resolved")}</span>}
 				{finding.resolution === "dismissed" && <span className="work-kind">{t("consistency.dismissed")}</span>}
@@ -379,8 +395,9 @@ function FindingRow({ finding, projectId, projectName, memoryById, resolvable, d
 						}
 						if (entry.sessionId) {
 							return (
-								<Link key={index} className="mono" to={`/sessions/${entry.sessionId}`} title={entry.sessionId}>
-									#{entry.sessionId.slice(0, 8)}{entry.turnPosition != null ? ` @${entry.turnPosition}` : ""}
+								<Link key={index} className="evidence-link" to={`/sessions/${entry.sessionId}`} title={entry.sessionId}>
+									{t("finding.sessionRef")}
+									{entry.turnPosition != null && <span className="turn-ref">{t("search.turn", { n: entry.turnPosition })}</span>}
 								</Link>
 							);
 						}
@@ -390,8 +407,8 @@ function FindingRow({ finding, projectId, projectName, memoryById, resolvable, d
 			)}
 			<div className="memory-meta">
 				{projectName && projectId != null && <><Link to={`/history/project/${projectId}`}>{projectName}</Link> · </>}
-				{fmtTime(finding.createdAt)}
-				{finding.occurrenceCount > 1 && <> · {t("finding.seen", { n: finding.occurrenceCount })} · {t("finding.lastSeen", { time: fmtTime(finding.lastSeenAt) })}</>}
+				{fmtAgo(finding.createdAt, locale)}
+				{finding.occurrenceCount > 1 && <> · {t("finding.seen", { n: finding.occurrenceCount })} · {t("finding.lastSeen", { time: fmtAgo(finding.lastSeenAt, locale) })}</>}
 			</div>
 			{resolvable && (
 				<div className="memory-actions">
