@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { InspectionCard, MemoriesCard, ModuleDetails, FindingsCard, partitionProjectTree } from "../src/views/History.js";
+import { Search } from "../src/views/Search.js";
 import { appendLiveDelta, InspectionLogPanel, LiveStreamBlocks } from "../src/views/InspectionLogs.js";
 import type { ProjectMemoryDTO } from "@pi-kanban/shared";
 
@@ -125,4 +126,9 @@ const legacyModuleDetails = renderToStaticMarkup(
 	/></MemoryRouter>,
 );
 assert.ok(legacyModuleDetails.includes("Legacy memory") === false);
+// A blank cross-project search is an idle guide, not an eternal loading state.
+const searchIdle = renderToStaticMarkup(<MemoryRouter><Search /></MemoryRouter>);
+assert.ok(searchIdle.includes("Find decisions across project history"));
+assert.ok(!searchIdle.includes("loading…"));
+
 console.log("project-memory UI checks passed");

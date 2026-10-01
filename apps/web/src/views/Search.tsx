@@ -24,6 +24,16 @@ export function Search() {
 	// Scores are BM25-ish and unbounded: show them as a bar relative to the best hit.
 	const top = Math.max(1, ...(results ? [...results.sessions, ...results.memories].map((h) => h.score) : []));
 
+	function submitSearch(value = query) {
+		setQuery(value);
+		setSubmitted(value.trim());
+	}
+
+	function clearSearch() {
+		setQuery("");
+		setSubmitted("");
+	}
+
 	return (
 		<div className="search-view">
 			<header className="page-head">
@@ -36,7 +46,7 @@ export function Search() {
 				className="search-form"
 				onSubmit={(event) => {
 					event.preventDefault();
-					setSubmitted(query.trim());
+					submitSearch();
 				}}
 			>
 				<label className="field">
@@ -50,6 +60,7 @@ export function Search() {
 							type="button"
 							className={scope === value ? "on" : ""}
 							aria-pressed={scope === value}
+							disabled={loading}
 							onClick={() => setScope(value)}
 						>
 							{t(`search.scope.${value}`)}
@@ -59,18 +70,18 @@ export function Search() {
 				<button type="submit" disabled={!query.trim() || loading}>
 					{t("search.submit")}
 				</button>
+				{submitted && (
+					<button className="secondary search-clear" type="button" onClick={clearSearch}>
+						{t("search.clear")}
+					</button>
+				)}
 			</form>
 			<div aria-live="polite">
-				{!path && (
-					<EmptyState
-						title={t("search.start")}
-						hint={t("search.hint")}
-					/>
-				)}
+				{!submitted && <SearchIdle onExample={submitSearch} />}
 				{error && <ErrorState error={error} onRetry={() => setRefreshKey((k) => k + 1)} />}
 				{path && loading && !results && <SkeletonRows count={4} />}
 				{results && results.sessions.length === 0 && results.memories.length === 0 && (
-					<EmptyState title={t("search.empty")} hint={t("search.hint")} />
+					<EmptyState title={t("search.empty")} hint={t("search.emptyHint", { query: submitted, scope: t(`search.scope.${scope}`) })} />
 				)}
 			</div>
 			{results && results.sessions.length > 0 && (
@@ -86,10 +97,10 @@ export function Search() {
 									<Link className="search-hit-link" to={`/sessions/${hit.sessionId}`} title={hit.sessionId}>
 										{hit.title ?? `#${hit.sessionId.slice(0, 8)}`}
 									</Link>
-										<span className="muted">{hit.projectName}</span>
-										<span className="search-score" title={t("search.relevance", { n: hit.score.toFixed(2) })}>
-											<span className="score-bar" style={{ "--p": `${Math.round((hit.score / top) * 100)}%` } as React.CSSProperties} />
-										</span>
+									<span className="muted">{hit.projectName}</span>
+									<span className="search-score" title={t("search.relevance", { n: hit.score.toFixed(2) })}>
+										<span className="score-bar" style={{ "--p": `${Math.round((hit.score / top) * 100)}%` } as React.CSSProperties} />
+									</span>
 								</div>
 								{hit.snippet && <p className="work-detail">…{hit.snippet}</p>}
 								<div className="memory-meta">
@@ -136,5 +147,25 @@ export function Search() {
 				</section>
 			)}
 		</div>
+	);
+}
+
+function SearchIdle({ onExample }: { onExample: (query: string) => void }) {
+	const { t } = useI18n();
+	const examples = t("search.exampleQueries").split(",").map((part) => part.trim()).filter(Boolean);
+	return (
+		<section className="search-idle" aria-labelledby="search-idle-title">
+			<div>
+				<h2 id="search-idle-title">{t("search.idle.title")}</h2>
+				<p>{t("search.idle.body")}</p>
+			</div>
+			<div className="search-examples" aria-label={t("search.examples")}>
+				{examples.map((example) => (
+					<button key={example} type="button" className="secondary" onClick={() => onExample(example)}>
+						{example}
+					</button>
+				))}
+			</div>
+		</section>
 	);
 }

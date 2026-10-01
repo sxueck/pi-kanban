@@ -5,7 +5,7 @@ import { agentDir, agentToken, loadConfig } from "./config.js";
 import { collectProjectSnapshot, gitIdentity, SnapshotThrottle } from "./project-snapshot.js";
 import { cacheStats, loadCachedDigest, MEMORY_PROMPT_BUDGET_BYTES, projectKey, renderMemoryPrompt, saveDigest } from "./memory-cache.js";
 import { formatStatus, type KanbanStatusSnapshot } from "./status.js";
-import { diffDigests, formatTaste, formatTasteNotice } from "./taste.js";
+import { formatTaste } from "./taste.js";
 import { Transport } from "./transport.js";
 import { registerNotify, type Notify } from "./notify.js";
 import { TurnState } from "./turn-state.js";
@@ -13,6 +13,25 @@ import { runGate, type GateDeps } from "./gate.js";
 import { staticText } from "./static-text.js";
 
 export { runGate };
+
+type WorkflowGuardDecision = {
+	toolCallId: string;
+	decision: "allow" | "block" | "ask" | "unavailable";
+	label: string;
+};
+
+function parseWorkflowGuardDecision(value: unknown): WorkflowGuardDecision | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const record = value as Partial<WorkflowGuardDecision>;
+	if (
+		typeof record.toolCallId !== "string" ||
+		typeof record.label !== "string" ||
+		(record.decision !== "allow" && record.decision !== "block" && record.decision !== "ask" && record.decision !== "unavailable")
+	) {
+		return undefined;
+	}
+	return record as WorkflowGuardDecision;
+}
 
 /**
  * pi-kanban extension: streams session lifecycle to the pi-kanban cloud
@@ -48,6 +67,16 @@ export default function (pi: ExtensionAPI): void {
 		getSessionId: () => sessionId,
 		getTurnPosition: () => turns.current,
 	};
+	const workflowGuardDecisions = new Map<string, WorkflowGuardDecision>();
+	let gateListenerRegistered = false;
+
+	pi.events.on("workflow-guard:delegate-probe", (ack: unknown) => {
+		if (typeof ack === "function") (ack as () => void)();
+	});
+	pi.events.on("workflow-guard:decision", (value: unknown) => {
+		const decision = parseWorkflowGuardDecision(value);
+		if (decision) workflowGuardDecisions.set(decision.toolCallId, decision);
+	});
 
 	// --- project memory digest (inspection → runtime loop) --------------------
 
@@ -67,14 +96,11 @@ export default function (pi: ExtensionAPI): void {
 	}
 
 	function applyDigest(digest: MemoryDigestMessage): void {
-		// Diff against the cached revision (the last state this machine saw) so
-		// post-inspection pushes surface what was just mined, TASTE-row style.
-		const previous = activeKey ? loadCachedDigest(agentDir(), activeKey) : null;
 		activeProjectId = digest.projectId;
 		activeDigest = digest;
 		activePromptBlock = renderMemoryPrompt(digest, MEMORY_PROMPT_BUDGET_BYTES);
-		const diff = diffDigests(previous, digest);
-		if (diff) notify(formatTasteNotice(diff));
+		// No transcript notice on digest change: the plugin stays silent unless a
+		// command (/taste, /kanban-status) is invoked explicitly.
 		saveDigest(agentDir(), activeKey, digest);
 	}
 
@@ -318,6 +344,7 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	pi.on("tool_execution_end", async (event) => {
+		workflowGuardDecisions.delete(event.toolCallId);
 		if (!sessionId) return;
 		const startedAt = toolStartTimes.get(event.toolCallId);
 		toolStartTimes.delete(event.toolCallId);
@@ -334,8 +361,15 @@ export default function (pi: ExtensionAPI): void {
 
 	// --- approval gate ------------------------------------------------------------------
 
-	pi.on("tool_call", async (event, ctx) => {
-		return runGate(gate, event, ctx);
+	pi.on("session_start", () => {
+		if (gateListenerRegistered) return;
+		gateListenerRegistered = true;
+		pi.on("tool_call", async (event, ctx) => {
+			const decision = workflowGuardDecisions.get(event.toolCallId);
+			workflowGuardDecisions.delete(event.toolCallId);
+			if (decision?.decision === "allow" || decision?.decision === "block") return;
+			return runGate(gate, event, ctx, decision ? { label: decision.label } : undefined);
+		});
 	});
 
 	// --- helpers ------------------------------------------------------------------------------

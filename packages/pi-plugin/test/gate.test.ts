@@ -432,6 +432,23 @@ const tests: Array<[string, () => Promise<void>]> = [
 			assert.equal(transport.requests[0]?.policyLabel, "rm -rf");
 		},
 	],
+	[
+		"runGate: workflow handoff prompts even when no local rule matches",
+		async () => {
+			const transport = new FakeTransport();
+			transport.connected = true;
+			const { ctx, confirmCalls } = makeCtx(true, false);
+			const result = await runGate(
+				{ gate: makeGate(), transport, getSessionId: () => "s1", getTurnPosition: () => 1 },
+				{ toolName: "bash", toolCallId: "tc-workflow", input: { command: "eval \"\"" } },
+				ctx,
+				{ label: "workflow-guard: dynamic eval" },
+			);
+			assert.deepEqual(result, { block: true, reason: "Denied locally: workflow-guard: dynamic eval" });
+			assert.equal(confirmCalls(), 1);
+			assert.equal(transport.requests[0]?.policyLabel, "workflow-guard: dynamic eval");
+		},
+	],
 ];
 
 let failed = 0;

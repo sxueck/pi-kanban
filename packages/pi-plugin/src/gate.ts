@@ -110,12 +110,17 @@ export interface GateDeps {
 	getTurnPosition(): number | undefined;
 }
 
+export interface GateHandoff {
+	label: string;
+}
+
 export async function runGate(
 	deps: GateDeps,
 	event: ToolCallEvent,
 	ctx: ExtensionContext,
+	handoff?: GateHandoff,
 ): Promise<{ block: boolean; reason?: string } | undefined> {
-	const rule = matchRule(deps.gate.rules, event.toolName, event.input);
+	const rule = handoff ? { label: handoff.label } : matchRule(deps.gate.rules, event.toolName, event.input);
 	if (!rule) return undefined;
 	if (!deps.transport.connected) return undefined;
 
