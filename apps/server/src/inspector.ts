@@ -206,6 +206,8 @@ export interface MemoryConsolidationPlan {
 	reinforces: Array<{ targetId: string; candidate: ModelMemoryCandidate }>;
 	/** Active memories whose corrected statement replaces them (same memoryKey, version+1). */
 	supersedes: Array<{ targetId: string; candidate: ModelMemoryCandidate }>;
+	/** Active memories this inspection proved no longer holds — archived, never re-injected. */
+	retires: Array<{ targetId: string; candidate: ModelMemoryCandidate }>;
 }
 
 /**
@@ -221,7 +223,7 @@ export function planMemoryConsolidation(
 ): MemoryConsolidationPlan {
 	const activeIds = new Set(existingActive.map((row) => row.memoryKey));
 	const existingContents = new Set(existingActive.map((row) => normalizeMemory(row.content)));
-	const plan: MemoryConsolidationPlan = { inserts: [], reinforces: [], supersedes: [] };
+	const plan: MemoryConsolidationPlan = { inserts: [], reinforces: [], supersedes: [], retires: [] };
 	const claimedTargets = new Set<string>();
 	for (const candidate of candidates) {
 		const requestedTargetId = candidate.action && candidate.targetId && activeIds.has(candidate.targetId)
@@ -237,6 +239,11 @@ export function planMemoryConsolidation(
 		if (targetId && candidate.action === "supersede") {
 			claimedTargets.add(targetId);
 			plan.supersedes.push({ targetId, candidate });
+			continue;
+		}
+		if (targetId && candidate.action === "retire") {
+			claimedTargets.add(targetId);
+			plan.retires.push({ targetId, candidate });
 			continue;
 		}
 		if (!existingContents.has(normalizeMemory(candidate.content))) {
@@ -782,6 +789,16 @@ async function persistInspectionResult(
 				lastSeenInspectionId: runId,
 				moduleIds: mergeModuleIds(row.moduleIds, candidate.moduleIds),
 				evidence: mergeEvidenceRows(row.evidence, candidate.evidence.filter(validSessionEvidence)),
+			}).where(and(eq(projectMemories.id, row.id), isNull(projectMemories.supersededAt)));
+		}
+		for (const { targetId } of plan.retires) {
+			const row = byTargetId.get(targetId);
+			if (!row) continue;
+			// Archived, not superseded: the row keeps its version and history, the
+			// digest drops it on the next build because only pinned/confirmed inject.
+			await tx.update(projectMemories).set({
+				status: "archived",
+				lastSeenInspectionId: runId,
 			}).where(and(eq(projectMemories.id, row.id), isNull(projectMemories.supersededAt)));
 		}
 		for (const { targetId, candidate } of plan.supersedes) {

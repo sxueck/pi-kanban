@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { PROJECT_MEMORY_MAX_AGE_MS } from "@pi-kanban/shared";
+import { PROJECT_MEMORY_ISSUE_MAX_AGE_MS, PROJECT_MEMORY_MAX_AGE_MS } from "@pi-kanban/shared";
 import {
 	buildDigestPayload,
 	DIGEST_MEMORY_LIMIT,
@@ -49,6 +49,24 @@ function finding(severity: string, ageDays = 0, summary = `issue-${severity}`): 
 	assert.equal(later.memories.length, 0, "the cutoff is inclusive and expires after one millisecond");
 }
 
+// Issue memories age out fastest: a fixed incident stops being re-evidenced,
+// so it leaves the prompt at 14 days while other kinds keep the 90-day window.
+{
+	const issueCutoffDays = PROJECT_MEMORY_ISSUE_MAX_AGE_MS / 86_400_000;
+	const issue = (content: string, ageDays: number, status = "confirmed") => ({
+		kind: "issue", content, status, occurrenceCount: 1, lastSeenAt: NOW - ageDays * 86_400_000,
+	});
+	const payload = buildDigestPayload("p", [
+		issue("stale-issue", issueCutoffDays + 1),
+		issue("fresh-issue", 1),
+		issue("old-pinned-issue", issueCutoffDays + 30, "pinned"),
+		memory("confirmed", 1, issueCutoffDays + 1, "old-fact-still-current"),
+	], [], [issue("old-global-issue", issueCutoffDays + 30)], NOW);
+	assert.deepEqual(payload.memories.map((m) => m.content), [
+		"old-global-issue", "old-pinned-issue", "fresh-issue", "old-fact-still-current",
+	]);
+}
+
 // Findings order by severity, then recency.
 {
 	const payload = buildDigestPayload("p", [], [
@@ -76,6 +94,15 @@ function finding(severity: string, ageDays = 0, summary = `issue-${severity}`): 
 	const content = payload.memories[0].content;
 	assert.ok(content.startsWith("x".repeat(50)) && content.length < 1000, "per-item truncation keeps a bounded prefix");
 	assert.match(content, /\[\+\d+ chars\]$/, "truncation is announced, not silent");
+}
+
+// The digest cap matches the ingest-side content cap, so a stored memory is
+// delivered whole instead of being cut mid-sentence.
+{
+	const whole = memory("confirmed", 1, 0, "z".repeat(600));
+	const payload = buildDigestPayload("p", [whole], [], [], NOW);
+	assert.equal(payload.memories[0].content.length, 600, "max-length stored content survives untouched");
+	assert.doesNotMatch(payload.memories[0].content, /\[\+\d+ chars\]$/);
 }
 
 // Byte budget: items are dropped whole; the serialized digest never exceeds MAX_DIGEST_BYTES.

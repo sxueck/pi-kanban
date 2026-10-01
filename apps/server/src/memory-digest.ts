@@ -18,13 +18,17 @@ export const DIGEST_MEMORY_LIMIT = 24;
 /** Global principles take precedence inside the shared memory budget. */
 export const DIGEST_GLOBAL_MEMORY_LIMIT = 8;
 export const DIGEST_FINDING_LIMIT = 8;
-const DIGEST_MEMORY_CHARS = 300;
+// Aligned with the ingest-side content cap (model.ts normalizeMemory slices to
+// 600), so a stored memory reaches the plugin whole instead of mid-sentence.
+const DIGEST_MEMORY_CHARS = 600;
 const DIGEST_FINDING_CHARS = 200;
 /**
  * Deterministic ceiling on the serialized digest delivered to plugins. Items
  * are dropped whole in reverse priority order; the JSON is never cut mid-item.
+ * Sized so the full memory set fits at DIGEST_MEMORY_CHARS (~700 B per entry ×
+ * DIGEST_MEMORY_LIMIT); the plugin's own prompt budget decides what is injected.
  */
-export const MAX_DIGEST_BYTES = 8_000;
+export const MAX_DIGEST_BYTES = 18_000;
 
 const MEMORY_STATUS_RANK: Partial<Record<ProjectMemoryStatus, number>> = { pinned: 0, confirmed: 1 };
 const UNRANKED = 99;
@@ -62,7 +66,7 @@ export function buildDigestPayload(
 ): Omit<MemoryDigestMessage, "type" | "projectId"> {
 	const rankMemories = (rows: DigestMemoryRow[], scope: "global" | "project") => rows
 		.filter((row) => MEMORY_STATUS_RANK[row.status as ProjectMemoryStatus] !== undefined
-			&& isCurrentProjectMemory({ status: row.status as ProjectMemoryStatus, scope, lastSeenAt: toMs(row.lastSeenAt) }, now))
+			&& isCurrentProjectMemory({ kind: row.kind as ProjectMemoryKind, status: row.status as ProjectMemoryStatus, scope, lastSeenAt: toMs(row.lastSeenAt) }, now))
 		.sort((a, b) =>
 			(MEMORY_STATUS_RANK[a.status as ProjectMemoryStatus] ?? UNRANKED) - (MEMORY_STATUS_RANK[b.status as ProjectMemoryStatus] ?? UNRANKED)
 			|| b.occurrenceCount - a.occurrenceCount

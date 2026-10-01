@@ -284,6 +284,9 @@ try {
 
 	assert.ok(SYSTEM_PROMPT.includes("the model's actions or conclusions departed from the user's stated goal"));
 	assert.ok(SYSTEM_PROMPT.includes("do not flag the user for intentionally changing the goal"));
+	// Mining admission and the retire path must stay in the prompt contract.
+	assert.ok(SYSTEM_PROMPT.includes("a memory must survive re-reading the repository"), "memories are gated on non-derivability from the repo");
+	assert.ok(SYSTEM_PROMPT.includes("action \"retire\""), "resolved memories have an explicit exit action");
 
 	// Model memory associations are bounded and deduplicated before persistence validation.
 	assert.deepEqual(
@@ -310,13 +313,16 @@ try {
 		{ kind: "fact", content: "brand new", confidence: "high", moduleIds: [], evidence: [] },
 		{ kind: "fact", content: "broken link", confidence: "high", moduleIds: [], evidence: [], action: "reinforce", targetId: uuid(9) },
 		{ kind: "fact", content: "already known", confidence: "high", moduleIds: [], evidence: [] },
+		{ kind: "issue", content: "stale incident, now fixed", confidence: "high", moduleIds: [], evidence: [], action: "retire", targetId: uuid(4) },
 	], [
 		{ memoryKey: uuid(1), content: "depends on crd x" },
 		{ memoryKey: uuid(2), content: "uses postgresql 15" },
 		{ memoryKey: uuid(3), content: "already known" },
+		{ memoryKey: uuid(4), content: "stale incident, now fixed" },
 	]);
 	assert.deepEqual(consolidation.reinforces.map((entry) => entry.targetId), [uuid(1)]);
 	assert.deepEqual(consolidation.supersedes.map((entry) => entry.targetId), [uuid(2)]);
+	assert.deepEqual(consolidation.retires.map((entry) => entry.targetId), [uuid(4)], "a retire target leaves the active set instead of inserting");
 	assert.deepEqual(consolidation.inserts.map((memory) => memory.content), ["brand new", "broken link"], "an unresolvable target degrades to a fresh insert");
 	// duplicate claims against one target collapse to the first
 	const doubleReinforce = planMemoryConsolidation([
@@ -326,12 +332,21 @@ try {
 	assert.equal(doubleReinforce.reinforces.length, 1);
 	assert.equal(doubleReinforce.inserts.length, 0, "later claims for the same active memory must not create duplicates");
 
+	// a retire claim owns the target: a later reinforce for it cannot resurrect it
+	const retiredThenReinforced = planMemoryConsolidation([
+		{ kind: "issue", content: "a", confidence: "high", moduleIds: [], evidence: [], action: "retire", targetId: uuid(1) },
+		{ kind: "issue", content: "b", confidence: "high", moduleIds: [], evidence: [], action: "reinforce", targetId: uuid(1) },
+	], [{ memoryKey: uuid(1), content: "x" }]);
+	assert.deepEqual(retiredThenReinforced.retires.map((entry) => entry.targetId), [uuid(1)]);
+	assert.equal(retiredThenReinforced.reinforces.length, 0);
+
 	// parser admits consolidation links and session findings, dropping malformed ones
 	const withActions = parseInspectionResult(JSON.stringify({
 		memories: [
 			{ kind: "fact", content: "reinforced", confidence: "high", moduleIds: [], evidence: [], action: "reinforce", targetId: uuid(1) },
 			{ kind: "fact", content: "bad action", confidence: "high", moduleIds: [], evidence: [], action: "delete", targetId: uuid(1) },
 			{ kind: "fact", content: "bad target", confidence: "high", moduleIds: [], evidence: [], action: "supersede", targetId: "not-a-uuid" },
+			{ kind: "issue", content: "resolved", confidence: "high", moduleIds: [], evidence: [], action: "retire", targetId: uuid(3) },
 		],
 		tree: [],
 		findings: [
@@ -341,7 +356,7 @@ try {
 			{ kind: "model_error", summary: "severity defaults to info" },
 		],
 	}));
-	assert.deepEqual(withActions.memories.map((memory) => memory.action ?? "new"), ["reinforce", "new", "new"], "malformed action/target pairs degrade to plain candidates");
+	assert.deepEqual(withActions.memories.map((memory) => memory.action ?? "new"), ["reinforce", "new", "new", "retire"], "malformed action/target pairs degrade to plain candidates");
 	assert.deepEqual(withActions.findings.map((finding) => finding.kind), ["context_gap", "intent_drift", "model_error"]);
 	assert.equal(withActions.findings[0]?.sessionId, "s1");
 	assert.equal(withActions.findings[2]?.severity, "info");

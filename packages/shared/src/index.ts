@@ -252,9 +252,17 @@ export interface MemoryDigestEntry {
 
 /** Non-pinned project memories stop influencing prompts without deleting their history. */
 export const PROJECT_MEMORY_MAX_AGE_MS = 90 * 24 * 60 * 60_000;
+/**
+ * Issues age out fastest: a still-true one is re-evidenced by every inspection
+ * and keeps its lastSeenAt fresh, so silence means it was fixed and nobody
+ * retired it. Without this, closed incidents hold prompt budget for a quarter.
+ */
+export const PROJECT_MEMORY_ISSUE_MAX_AGE_MS = 14 * 24 * 60 * 60_000;
 
-export function isCurrentProjectMemory(memory: Pick<MemoryDigestEntry, "scope" | "status" | "lastSeenAt">, now = Date.now()): boolean {
-	return memory.scope === "global" || memory.status === "pinned" || now - memory.lastSeenAt <= PROJECT_MEMORY_MAX_AGE_MS;
+export function isCurrentProjectMemory(memory: Pick<MemoryDigestEntry, "kind" | "scope" | "status" | "lastSeenAt">, now = Date.now()): boolean {
+	if (memory.scope === "global" || memory.status === "pinned") return true;
+	const maxAge = memory.kind === "issue" ? PROJECT_MEMORY_ISSUE_MAX_AGE_MS : PROJECT_MEMORY_MAX_AGE_MS;
+	return now - memory.lastSeenAt <= maxAge;
 }
 
 export interface MemoryDigestFinding {

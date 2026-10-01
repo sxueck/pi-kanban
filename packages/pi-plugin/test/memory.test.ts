@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PROJECT_MEMORY_MAX_AGE_MS, type MemoryDigestMessage } from "@pi-kanban/shared";
+import { PROJECT_MEMORY_ISSUE_MAX_AGE_MS, PROJECT_MEMORY_MAX_AGE_MS, type MemoryDigestMessage } from "@pi-kanban/shared";
 import {
 	loadCachedDigest,
 	MEMORY_CACHE_TTL_MS,
@@ -81,6 +81,23 @@ assert.equal(projectKey(undefined, "/repo/path"), "/repo/path");
 	assert.match(expired, /old pinned/);
 	assert.match(expired, /old global/);
 	assert.equal(renderMemoryPrompt(digest({ findings: [] }), undefined, NOW + PROJECT_MEMORY_MAX_AGE_MS + 1), undefined);
+}
+
+// Issue memories drop out of the prompt on the short issue window; facts keep the long one.
+{
+	const block = renderMemoryPrompt(digest({
+		memories: [
+			{ kind: "issue", content: "stale incident", status: "confirmed", occurrenceCount: 1, lastSeenAt: NOW - PROJECT_MEMORY_ISSUE_MAX_AGE_MS - 1 },
+			{ kind: "issue", content: "open incident", status: "confirmed", occurrenceCount: 1, lastSeenAt: NOW - 1 },
+			{ kind: "issue", content: "pinned incident", status: "pinned", occurrenceCount: 1, lastSeenAt: 0 },
+			{ kind: "fact", content: "old but factual", status: "confirmed", occurrenceCount: 1, lastSeenAt: NOW - PROJECT_MEMORY_ISSUE_MAX_AGE_MS - 1 },
+		],
+		findings: [],
+	}), undefined, NOW)!;
+	assert.doesNotMatch(block, /stale incident/, "a fixed issue stops being injected without anyone deleting it");
+	assert.match(block, /open incident/);
+	assert.match(block, /pinned incident/);
+	assert.match(block, /old but factual/, "non-issue kinds keep the 90-day window");
 }
 
 // Disk cache roundtrip.
