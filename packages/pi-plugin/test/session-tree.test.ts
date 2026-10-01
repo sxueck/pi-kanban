@@ -26,13 +26,17 @@ const previousWebSocket = globalThis.WebSocket;
 Object.defineProperty(globalThis, "WebSocket", { configurable: true, value: FakeWebSocket });
 
 try {
-	const handlers = new Map<string, Handler>();
+	// The real harness invokes every listener per event; the plugin registers
+	// multiple session_start handlers, so the stub must keep them all.
+	const handlers = new Map<string, Handler[]>();
 	const commands = new Map<string, Handler>();
 	const entries: Array<{ type: string; data: { text?: string } }> = [];
 	const pi = {
 		events: { on: () => {} },
 		on(event: string, handler: Handler) {
-			handlers.set(event, handler);
+			const list = handlers.get(event) ?? [];
+			list.push(handler);
+			handlers.set(event, list);
 		},
 		registerEntryRenderer: () => {},
 		registerTool: () => {},
@@ -48,15 +52,19 @@ try {
 	process.env.PI_CODING_AGENT_DIR = cwd;
 	plugin(pi);
 
-	await handlers.get("session_start")?.({ reason: "new" }, {
+	async function emit(event: string, ...args: Parameters<Handler>) {
+		for (const handler of handlers.get(event) ?? []) await handler(...args);
+	}
+
+	await emit("session_start", { reason: "new" } as never, {
 		sessionManager: { getSessionId: () => "session-tree-test" },
 		cwd,
-	});
-	await handlers.get("before_agent_start")?.({ prompt: "test", systemPrompt: "system" });
+	} as never);
+	await emit("before_agent_start", { prompt: "test", systemPrompt: "system" } as never);
 	await commands.get("kanban-status")?.({}, { ui: { notify: () => {} } });
 	assert.match(entries.at(-1)?.data.text ?? "", /0\/1 turns injected/);
 
-	handlers.get("session_tree")?.();
+	await emit("session_tree");
 	await commands.get("kanban-status")?.({}, { ui: { notify: () => {} } });
 	assert.doesNotMatch(entries.at(-1)?.data.text ?? "", /turns injected/);
 } finally {

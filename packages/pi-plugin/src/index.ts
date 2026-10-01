@@ -121,6 +121,7 @@ export default function (pi: ExtensionAPI): void {
 	pi.registerCommand("kanban-status", {
 		description: "Show pi-kanban connection, memory digest and injection metrics",
 		handler: async (_args, ctx) => {
+			const promptBlock = activeDigest ? renderMemoryPrompt(activeDigest, MEMORY_PROMPT_BUDGET_BYTES) : undefined;
 			const snapshot: KanbanStatusSnapshot = {
 				serverUrl: config.server.url,
 				connected: transport.connected,
@@ -129,7 +130,7 @@ export default function (pi: ExtensionAPI): void {
 				totalTurns,
 				injectedTurns,
 				digest: activeDigest,
-				promptBlockBytes: activePromptBlock ? Buffer.byteLength(activePromptBlock) : 0,
+				promptBlockBytes: promptBlock ? Buffer.byteLength(promptBlock) : 0,
 				promptBudgetBytes: MEMORY_PROMPT_BUDGET_BYTES,
 				cacheEntries: cacheStats(agentDir()),
 				now: Date.now(),
@@ -269,8 +270,9 @@ export default function (pi: ExtensionAPI): void {
 			startedAt: Date.now(),
 		});
 		totalTurns++;
-		// Stable per digest revision, so the provider prompt cache only invalidates
-		// when an inspection actually changed the memories.
+		// Recheck age at turn start so an offline cache or a long-running session
+		// cannot keep a project memory past its freshness window.
+		if (activeDigest) activePromptBlock = renderMemoryPrompt(activeDigest, MEMORY_PROMPT_BUDGET_BYTES);
 		if (activePromptBlock) {
 			injectedTurns++;
 			return { systemPrompt: `${event.systemPrompt}\n\n${activePromptBlock}` };

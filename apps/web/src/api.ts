@@ -305,6 +305,12 @@ export function useResource<T>(path: string | null, refreshKey = 0): {
 	}, []);
 
 	useEffect(() => {
+		// A null path means "not requested yet" — never leave that as in-flight,
+		// or callers gating a submit button on `loading` disable it forever.
+		if (!path) {
+			setLoading(false);
+			return;
+		}
 		if (loaderRef.current === null) loaderRef.current = buildLoader();
 		loaderRef.current.request(path);
 	}, [path, version, refreshKey]);
@@ -333,6 +339,13 @@ export function fmtCost(usd: number): string {
 	return usd >= 1 ? `$${usd.toFixed(2)}` : `$${usd.toFixed(3)}`;
 }
 
+/** Token counts are read in the millions here; one unit keeps the rails aligned. */
+export function fmtTokens(n: number): string {
+	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+	if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+	return String(Math.round(n));
+}
+
 export function fmtElapsed(fromMs: number, toMs?: number): string {
 	const ms = (toMs ?? Date.now()) - fromMs;
 	const sec = Math.max(0, Math.floor(ms / 1000));
@@ -341,6 +354,32 @@ export function fmtElapsed(fromMs: number, toMs?: number): string {
 	if (min < 60) return `${min}m${sec % 60}s`;
 	const hr = Math.floor(min / 60);
 	return `${hr}h${min % 60}m`;
+}
+
+/**
+ * "How long ago" as one localized phrase ("3d ago" / "3天前"). Narrow style
+ * keeps dense lists scannable; the absolute timestamp belongs in a title attr.
+ * Units come from Intl, never a hand-rolled suffix, so zh/en stay grammatical.
+ */
+export function fmtAgo(fromMs: number, locale: string, toMs?: number): string {
+	const sec = Math.max(0, Math.floor(((toMs ?? Date.now()) - fromMs) / 1000));
+	const rtf = new Intl.RelativeTimeFormat(locale, { style: "narrow", numeric: "auto" });
+	if (sec < 60) return rtf.format(-sec, "second");
+	if (sec < 3_600) return rtf.format(-Math.floor(sec / 60), "minute");
+	if (sec < 86_400) return rtf.format(-Math.floor(sec / 3_600), "hour");
+	if (sec < 30 * 86_400) return rtf.format(-Math.floor(sec / 86_400), "day");
+	if (sec < 365 * 86_400) return rtf.format(-Math.floor(sec / (30 * 86_400)), "month");
+	return rtf.format(-Math.floor(sec / (365 * 86_400)), "year");
+}
+
+/** Future counterpart of fmtAgo, for scheduled slots ("in 3 hours"). */
+export function fmtUntil(toMs: number, locale: string, fromMs = Date.now()): string {
+	const sec = Math.round((toMs - fromMs) / 1000);
+	const rtf = new Intl.RelativeTimeFormat(locale, { style: "narrow", numeric: "auto" });
+	if (sec < 60) return rtf.format(Math.max(0, sec), "second");
+	if (sec < 3_600) return rtf.format(Math.round(sec / 60), "minute");
+	if (sec < 86_400) return rtf.format(Math.round(sec / 3_600), "hour");
+	return rtf.format(Math.round(sec / 86_400), "day");
 }
 
 export function fmtTime(ms: number): string {

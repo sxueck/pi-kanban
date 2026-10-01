@@ -8,10 +8,10 @@ import type {
 	ProjectMemoryKind,
 	ProjectMemoryStatus,
 } from "@pi-kanban/shared";
-import { apiErrorMessage, apiPost, fmtTime, useResource } from "../api.js";
+import { apiErrorMessage, apiPost, fmtAgo, fmtTime, useResource } from "../api.js";
 import { useI18n } from "../i18n.js";
-import { Skeleton } from "../components/skeleton.js";
 import type { MsgKey } from "../i18n.js";
+import { ErrorState, Skeleton, SkeletonRows } from "../components/states.js";
 
 const MEMORY_KINDS: ProjectMemoryKind[] = ["decision", "preference", "fact", "pattern", "issue"];
 
@@ -42,45 +42,65 @@ export function Consistency() {
 	}
 
 	return (
-		<div className="consistency-view">
-			<header className="consistency-header">
-				<div>
-					<h1 className="page-title">{t("consistency.title")}</h1>
-					<p className="muted">{t("consistency.subtitle")}</p>
-				</div>
-			</header>
-			{error && <div className="error" role="alert">{apiErrorMessage(error)}</div>}
-			{loading && !data && <Skeleton className="consistency-skeleton" rows={3} labelKey="common.loading" />}
-			{actionError && <div className="error consistency-feedback" role="alert">{actionError}</div>}
-			{actionNotice && <div className="notice consistency-feedback" role="status">{actionNotice}</div>}
-			{global && (
-				<div className="consistency-main">
-					<AuditCard state={global.state} runs={global.runs} busy={running} onRun={() => void runAudit()} />
-					<GlobalMemoriesCard
-						memories={global.memories}
-						onError={setActionError}
-						onNotice={setActionNotice}
-						onChanged={refresh}
-					/>
-					<FindingsSection
-						title={t("consistency.findings")}
-						findings={global.findings.map((finding) => ({ finding, projectId: undefined, projectName: undefined }))}
-						memories={global.memories}
-						resolvable
-						onError={setActionError}
-						onNotice={setActionNotice}
-						onChanged={refresh}
-					/>
-					<FindingsSection
-						title={t("consistency.projectFindings")}
-						findings={(data?.projectFindings ?? []).map((finding) => ({ finding: { ...finding }, projectId: finding.projectId, projectName: finding.projectName }))}
-						memories={[]}
-						onError={setActionError}
-						onNotice={setActionNotice}
-						onChanged={refresh}
-					/>
-				</div>
-			)}
+		<div className="board-layout consistency-view">
+			<div className="board-main">
+				<header className="page-head">
+					<div>
+						<h1 className="page-title">{t("consistency.title")}</h1>
+						<p>{t("consistency.subtitle")}</p>
+					</div>
+				</header>
+				{error && <ErrorState error={error} onRetry={refresh} />}
+				{loading && !data && <SkeletonRows count={4} />}
+				{actionError && <ErrorState error={actionError} />}
+				{actionNotice && <div className="notice consistency-feedback" role="status">{actionNotice}</div>}
+				{global && (
+					<div className="project-work-main">
+						<div className="project-sessions consistency-main">
+							<FindingsSection
+								title={t("consistency.findings")}
+								findings={global.findings.map((finding) => ({ finding, projectId: undefined, projectName: undefined }))}
+								memories={global.memories}
+								resolvable
+								onError={setActionError}
+								onNotice={setActionNotice}
+								onChanged={refresh}
+							/>
+							<FindingsSection
+								title={t("consistency.projectFindings")}
+								findings={(data?.projectFindings ?? []).map((finding) => ({ finding: { ...finding }, projectId: finding.projectId, projectName: finding.projectName }))}
+								memories={[]}
+								onError={setActionError}
+								onNotice={setActionNotice}
+								onChanged={refresh}
+							/>
+						</div>
+					</div>
+				)}
+			</div>
+			<aside className="board-rail" aria-busy={loading && !data}>
+				{global ? (
+					<div className="rail-group">
+						<AuditCard
+							state={global.state}
+							runs={global.runs}
+							busy={running}
+							onRun={() => void runAudit()}
+						/>
+						<GlobalMemoriesCard
+							memories={global.memories}
+							onError={setActionError}
+							onNotice={setActionNotice}
+							onChanged={refresh}
+						/>
+					</div>
+				) : (
+					<div className="rail-group" aria-hidden="true">
+						<Skeleton style={{ height: 120, borderRadius: "var(--radius)" }} />
+						<Skeleton style={{ height: 220, borderRadius: "var(--radius)" }} />
+					</div>
+				)}
+			</aside>
 		</div>
 	);
 }
@@ -91,8 +111,9 @@ function AuditCard({ state, runs, busy, onRun }: {
 	busy: boolean;
 	onRun: () => void;
 }) {
-	const { t } = useI18n();
-	const unavailable = state.eligibleProjects < 2;
+	const { t, locale } = useI18n();
+	const failed = Boolean(state.lastError) && !state.running;
+	const canRun = state.eligibleProjects >= 2;
 	return (
 		<section className="board-section consistency-audit-card">
 			<header>
@@ -106,22 +127,25 @@ function AuditCard({ state, runs, busy, onRun }: {
 			</header>
 			<div className="consistency-audit-body">
 				<div>
-					{!state.running && state.lastRunAt && <p className="memory-meta">{t("consistency.lastRun", { time: fmtTime(state.lastRunAt) })}</p>}
-					{!state.running && state.lastError && <p className="error work-hint">{t("consistency.lastError")}: {state.lastError}</p>}
-					{unavailable && <p className="muted work-hint">{t("consistency.needCorpus")}</p>}
+					{!state.running && state.lastRunAt && <p className="memory-meta" title={fmtTime(state.lastRunAt)}>{t("consistency.lastRun", { time: fmtAgo(state.lastRunAt, locale) })}</p>}
+					{failed && <p className="error work-hint">{t("consistency.lastError")}: {state.lastError}</p>}
+					{!canRun && <p className="muted work-hint">{t("consistency.needCorpus")}</p>}
 				</div>
-				<button type="button" disabled={busy || state.running || unavailable} onClick={onRun}>
+				<button type="button" disabled={busy || state.running || !canRun} onClick={onRun}>
 					{state.running || busy ? t("consistency.running") : t("consistency.run")}
 				</button>
 			</div>
 			{runs.length > 0 && (
 				<ul className="audit-run-list" aria-label={t("consistency.runs")}>
 					{runs.slice(0, 5).map((run) => (
-						<li key={run.inspectionId}>
-							<span className={`work-kind run-status-${run.status}`}>{run.status}</span>
-							<span>{fmtTime(run.startedAt)}</span>
-							<span className="muted">{run.trigger}</span>
-							{run.error && <span className="run-error">{run.error}</span>}
+						<li key={run.inspectionId} className="insight-item">
+							<div className="insight-head">
+								<span className={`run-status run-status-${run.status}`} title={run.error}>{t(`logs.status.${run.status}` as MsgKey)}</span>
+								<span className="insight-label" title={fmtTime(run.startedAt)}>
+									{fmtAgo(run.startedAt, locale)} · {t(`logs.trigger.${run.trigger}` as MsgKey)}
+								</span>
+							</div>
+							{run.error && <p className="work-detail">{run.error}</p>}
 						</li>
 					))}
 				</ul>
@@ -373,7 +397,7 @@ function FindingsSection({ title, findings, memories, resolvable, onError, onNot
 			)}
 			{closed.length > 0 && (
 				<details className="closed-findings">
-					<summary>{t("consistency.resolved")}/{t("consistency.dismissed")} · {closed.length}</summary>
+					<summary>{t("consistency.closed", { n: closed.length })}</summary>
 					<ul className="memory-list">
 						{closed.map(({ finding, projectId, projectName }) => (
 							<FindingRow key={`${projectId ?? "g"}-${finding.id}`} finding={finding} projectId={projectId} projectName={projectName} memoryById={memoryById} resolvable={resolvable} pending={pendingId === finding.id} blocked={pendingId !== null && pendingId !== finding.id} dismissConfirming={false} onDismissTarget={setDismissTarget} onResolve={setResolution} dimmed />
@@ -398,11 +422,11 @@ function FindingRow({ finding, projectId, projectName, memoryById, resolvable, d
 	onDismissTarget: (id: number | null) => void;
 	onResolve: (id: number, resolution: Exclude<GlobalFindingDTO["resolution"], undefined>) => void;
 }) {
-	const { t } = useI18n();
+	const { t, locale } = useI18n();
 	return (
 		<li className={`insight-item severity-${finding.severity}${dimmed ? " is-closed" : ""}`}>
 			<div className="insight-head">
-				<span className="work-kind">{t("finding.kind.direction_conflict")}</span>
+				<span className="finding-kind">{t("finding.kind.direction_conflict")}</span>
 				<span className="insight-label">{finding.summary}</span>
 				{finding.resolution === "resolved" && <span className="work-kind">{t("consistency.resolved")}</span>}
 				{finding.resolution === "dismissed" && <span className="work-kind">{t("consistency.dismissed")}</span>}
@@ -413,18 +437,31 @@ function FindingRow({ finding, projectId, projectName, memoryById, resolvable, d
 					{finding.evidence.map((entry, index) => {
 						if (entry.memoryId) {
 							const memory = memoryById.get(entry.memoryId);
-							const label = memory ? `${t("finding.memoryRef")} ${memory.content.slice(0, 60)}${memory.content.length > 60 ? "…" : ""}` : `${t("finding.memoryRef")} #${entry.memoryId.slice(0, 8)}`;
-							return projectId != null ? <Link key={index} className="mono" to={`/history/project/${projectId}`} title={entry.memoryId}>{label}</Link> : <span key={index} className="mono" title={entry.memoryId}>{label}</span>;
+							const label = memory
+								? `${t("finding.memoryRef")} ${memory.content.slice(0, 60)}${memory.content.length > 60 ? "…" : ""}`
+								: `${t("finding.memoryRef")} #${entry.memoryId.slice(0, 8)}`;
+							return projectId != null ? (
+								<Link key={index} className="mono" to={`/history/project/${projectId}`} title={entry.memoryId}>{label}</Link>
+							) : (
+								<span key={index} className="mono" title={entry.memoryId}>{label}</span>
+							);
 						}
-						if (entry.sessionId) return <Link key={index} className="mono" to={`/sessions/${entry.sessionId}`} title={entry.sessionId}>#{entry.sessionId.slice(0, 8)}{entry.turnPosition != null ? ` @${entry.turnPosition}` : ""}</Link>;
+						if (entry.sessionId) {
+							return (
+								<Link key={index} className="evidence-link" to={`/sessions/${entry.sessionId}`} title={entry.sessionId}>
+									{t("finding.sessionRef")}
+									{entry.turnPosition != null && <span className="turn-ref">{t("search.turn", { n: entry.turnPosition })}</span>}
+								</Link>
+							);
+						}
 						return null;
 					})}
 				</div>
 			)}
 			<div className="memory-meta">
 				{projectName && projectId != null && <><Link to={`/history/project/${projectId}`}>{projectName}</Link> · </>}
-				{fmtTime(finding.createdAt)}
-				{finding.occurrenceCount > 1 && <> · {t("finding.seen", { n: finding.occurrenceCount })} · {t("finding.lastSeen", { time: fmtTime(finding.lastSeenAt) })}</>}
+				{fmtAgo(finding.createdAt, locale)}
+				{finding.occurrenceCount > 1 && <> · {t("finding.seen", { n: finding.occurrenceCount })} · {t("finding.lastSeen", { time: fmtAgo(finding.lastSeenAt, locale) })}</>}
 			</div>
 			{resolvable && (
 				<div className="memory-actions">

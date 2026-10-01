@@ -4,6 +4,7 @@ import { apiGetPublic, apiPost, apiPostPublic, clearToken, getToken, setToken, U
 import { useI18n } from "./i18n.js";
 import { notifyNewApprovals } from "./settings.js";
 import { GateIllustration, NotFoundIllustration } from "./components/illustrations.js";
+import { EmptyState, ErrorState } from "./components/states.js";
 import { NavIcon, type NavIconName } from "./components/icons.js";
 import { Account } from "./views/Account.js";
 import { Board } from "./views/Board.js";
@@ -20,6 +21,7 @@ interface AuthResponse {
 }
 
 export function App() {
+	const { t } = useI18n();
 	const [authed, setAuthed] = useState(() => Boolean(getToken()));
 	useEffect(() => {
 		const onUnauthorized = () => {
@@ -32,8 +34,11 @@ export function App() {
 	if (!authed) return <AuthGate onOk={() => setAuthed(true)} />;
 	return (
 		<div className="app">
+			<a className="skip-link" href="#main">
+				{t("nav.skip")}
+			</a>
 			<Nav />
-			<main className="content">
+			<main className="content" id="main">
 				<Routes>
 					<Route path="/" element={<Board />} />
 					<Route path="/approvals" element={<Approvals />} />
@@ -91,18 +96,39 @@ function AuthGate({ onOk }: { onOk: () => void }) {
 	return (
 		<div className="token-gate">
 			<div className="gate-card">
+				<span className="gate-mark" aria-hidden="true">
+					<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+						<path d="M4 3.5h8" />
+						<path d="M6.2 3.5V12.5" />
+						<path d="M9.8 3.5V12.5" />
+					</svg>
+				</span>
 				<GateIllustration />
-				<h1>pi-kanban</h1>
+				<h1 className="gate-wordmark">
+					<strong>pi</strong>-kanban
+				</h1>
 				<p>{setupRequired ? t("gate.setupIntro") : t("gate.loginIntro")}</p>
 				<form onSubmit={(event) => void submit(event)}>
-					<input placeholder={t("auth.username")} value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" autoFocus required />
-					<input type="password" placeholder={t("auth.password")} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={setupRequired ? "new-password" : "current-password"} required />
-					{setupRequired && <input type="password" placeholder={t("auth.bootstrapToken")} value={bootstrapToken} onChange={(event) => setBootstrapToken(event.target.value)} required />}
+					<label className="field">
+						<span>{t("auth.username")}</span>
+						<input placeholder={t("auth.username")} value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" autoFocus required />
+					</label>
+					<label className="field">
+						<span>{t("auth.password")}</span>
+						<input type="password" placeholder={t("auth.password")} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={setupRequired ? "new-password" : "current-password"} required />
+					</label>
+					{setupRequired && (
+						<label className="field">
+							<span>{t("auth.bootstrapToken")}</span>
+							<input type="password" placeholder={t("auth.bootstrapToken")} value={bootstrapToken} onChange={(event) => setBootstrapToken(event.target.value)} required />
+						</label>
+					)}
 					<button type="submit" disabled={submitting || setupRequired == null}>
+						{submitting && <span className="spinner" aria-hidden="true" />}
 						{setupRequired ? t("gate.createAdmin") : t("gate.signIn")}
 					</button>
 				</form>
-				{error && <p className="error">{error}</p>}
+				{error && <ErrorState error={error} />}
 			</div>
 		</div>
 	);
@@ -133,7 +159,9 @@ function Nav() {
 						<path d="M9.8 3.5V12.5" />
 					</svg>
 				</span>
-				<span className="nav-label">pi-kanban</span>
+				<span className="wordmark">
+					<strong>pi</strong>-kanban
+				</span>
 			</div>
 			{groups.map(([label, links]) => (
 				<div key={label} className="nav-group">
@@ -146,7 +174,12 @@ function Nav() {
 							<Link key={to} to={to} className={active ? "active" : ""} aria-label={linkLabel}>
 								<NavIcon name={icon} />
 								<span className="nav-label">{linkLabel}</span>
-								{to === "/approvals" && pendingBadge > 0 && <span className="badge">{pendingBadge}</span>}
+								{to === "/approvals" && pendingBadge > 0 && (
+								<>
+									<span className="badge" aria-hidden="true">{pendingBadge}</span>
+									<span className="sr-only" role="status">{t("notify.newApprovals", { n: pendingBadge })}</span>
+								</>
+							)}
 							</Link>
 						);
 					})}
@@ -213,11 +246,11 @@ function useApprovalNotifications(pending: number): void {
 function NotFound() {
 	const { t } = useI18n();
 	return (
-		<div className="empty">
-			<NotFoundIllustration />
-			<h2>{t("notfound.title")}</h2>
-			<p>{t("notfound.body")}</p>
-			<p><Link to="/">{t("notfound.back")}</Link></p>
-		</div>
+		<EmptyState
+			illustration={<NotFoundIllustration />}
+			title={t("notfound.title")}
+			hint={t("notfound.body")}
+			action={<Link to="/">{t("notfound.back")}</Link>}
+		/>
 	);
 }

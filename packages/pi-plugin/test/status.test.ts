@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { MemoryDigestMessage } from "@pi-kanban/shared";
+import { PROJECT_MEMORY_MAX_AGE_MS, type MemoryDigestMessage } from "@pi-kanban/shared";
 import { cacheStats, saveDigest } from "../src/memory-cache.js";
 import { formatStatus, type KanbanStatusSnapshot } from "../src/status.js";
 
@@ -16,7 +16,7 @@ function digest(overrides: Partial<MemoryDigestMessage> = {}): MemoryDigestMessa
 		revision: "a1b2c3d4e5f6",
 		generatedAt: NOW - 12 * 60_000,
 		memories: [
-			{ kind: "pattern", content: "prefer pnpm", status: "confirmed", occurrenceCount: 3, lastSeenAt: 0 },
+			{ kind: "pattern", content: "prefer pnpm", status: "confirmed", occurrenceCount: 3, lastSeenAt: NOW },
 			{ kind: "decision", content: "keep gate rules strict", status: "pinned", occurrenceCount: 1, lastSeenAt: 0 },
 		],
 		findings: [
@@ -54,6 +54,12 @@ function snapshot(overrides: Partial<KanbanStatusSnapshot> = {}): KanbanStatusSn
 	assert.match(text, /memories    2 injected \(1 pinned, 1 confirmed\)/);
 	assert.match(text, /findings    2 \(1 error, 1 info\)/);
 	assert.match(text, /injection   active · 3200 \/ 4096 B/);
+}
+
+// The count matches the prompt after a cached memory ages out.
+{
+	const text = formatStatus(snapshot({ now: NOW + PROJECT_MEMORY_MAX_AGE_MS + 1 }));
+	assert.match(text, /memories    1 injected \(1 pinned, 0 confirmed\)/);
 }
 
 // No digest yet: state is explicit, not a crash or a blank panel.

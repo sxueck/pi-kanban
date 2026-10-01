@@ -1,4 +1,4 @@
-import type { MemoryDigestMessage } from "@pi-kanban/shared";
+import { isCurrentProjectMemory, type MemoryDigestMessage } from "@pi-kanban/shared";
 
 /** Everything /kanban-status reports, collected by the extension factory. */
 export interface KanbanStatusSnapshot {
@@ -35,9 +35,10 @@ export function formatStatus(snapshot: KanbanStatusSnapshot): string {
 	if (digest) {
 		lines.push(`  project     ${digest.projectName} (#${digest.projectId})`);
 		lines.push(`  digest      rev ${digest.revision} · ${relativeAge(digest.generatedAt, snapshot.now)}`);
-		const pinned = digest.memories.filter((m) => m.status === "pinned").length;
-		const confirmed = digest.memories.length - pinned;
-		lines.push(`  memories    ${digest.memories.length} injected (${pinned} pinned, ${confirmed} confirmed)`);
+		const currentMemories = digest.memories.filter((memory) => isCurrentProjectMemory(memory, snapshot.now));
+		const pinned = currentMemories.filter((m) => m.status === "pinned").length;
+		const confirmed = currentMemories.length - pinned;
+		lines.push(`  memories    ${currentMemories.length} injected (${pinned} pinned, ${confirmed} confirmed)`);
 		lines.push(`  findings    ${findingSummary(digest.findings)}`);
 		const active = snapshot.promptBlockBytes > 0;
 		lines.push(`  injection   ${active ? "active" : "inactive (empty digest)"} · ${snapshot.promptBlockBytes} / ${snapshot.promptBudgetBytes} B`);

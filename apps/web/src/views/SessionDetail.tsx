@@ -1,19 +1,33 @@
 import { useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import type { MessageDTO, SessionDetailDTO, ToolCallDTO, TurnDTO } from "@pi-kanban/shared";
-import { cacheHitRate, fmtCost, fmtElapsed, fmtTime, useResource } from "../api.js";
+import { cacheHitRate, fmtAgo, fmtCost, fmtElapsed, fmtTime, fmtTokens, useResource } from "../api.js";
 import { useI18n } from "../i18n.js";
 import type { MsgKey } from "../i18n.js";
+import { StateIcon } from "../components/icons.js";
+import { ErrorState, Skeleton, SkeletonRows } from "../components/states.js";
 
 export function SessionDetail() {
 	const { id } = useParams<{ id: string }>();
-	const { t } = useI18n();
+	const { t, locale } = useI18n();
 	const navigate = useNavigate();
+	const [retry, setRetry] = useState(0);
 	const { data, error, loading } = useResource<SessionDetailDTO>(
 		id ? `/api/sessions/${id}` : null,
+		retry,
 	);
-	if (error) return <div className="error">{String(error)}</div>;
-	if (loading && !data) return <div className="empty">loading…</div>;
+	if (error) return <ErrorState error={error} onRetry={() => setRetry((n) => n + 1)} />;
+	if (loading && !data) {
+		return (
+			<div className="session-detail">
+				<div className="detail-main">
+					<Skeleton style={{ height: 96, borderRadius: "var(--radius)" }} />
+					<SkeletonRows count={4} />
+					<Skeleton style={{ flex: 1, minHeight: 260, borderRadius: "var(--radius)" }} />
+				</div>
+			</div>
+		);
+	}
 	if (!data) return null;
 	const s = data;
 
@@ -31,19 +45,19 @@ export function SessionDetail() {
 							else navigate("/");
 						}}
 					>
-						← {t("nav.back")}
+						<span className="back-arrow" aria-hidden="true">←</span> {t("nav.back")}
 					</button>
 					<div className="project">
-						{s.projectName}
+						{s.projectId != null ? <Link to={`/history/project/${s.projectId}`}>{s.projectName}</Link> : s.projectName}
 						{s.branch && <span className="branch">{s.branch}</span>}
-						<span className={`state state-${s.state}`}>{t(`state.${s.state}` as MsgKey)}</span>
+						<span className={`state state-${s.state}`}><StateIcon state={s.state} />{t(`state.${s.state}` as MsgKey)}</span>
 					</div>
 					<h2>{s.title ?? s.id}</h2>
-					<div className="card-meta">
-						<span>{t("detail.started", { time: fmtTime(s.startedAt) })}</span>
-						<span>{t("detail.active", { elapsed: fmtElapsed(s.lastActivityAt) })}</span>
+					<div className="detail-meta">
+						<span title={fmtTime(s.startedAt)}>{t("detail.started", { time: fmtAgo(s.startedAt, locale) })}</span>
+						<span>{t("detail.active", { time: fmtAgo(s.lastActivityAt, locale) })}</span>
 						<span>{t("detail.turns", { n: s.turns.length })}</span>
-						<span>{fmtCost(s.totalCostUsd)}</span>
+						<span className="strong">{fmtCost(s.totalCostUsd)}</span>
 						{s.modelId && <span className="mono">{s.modelId}</span>}
 						<CacheMetric session={s} />
 					</div>
@@ -215,11 +229,26 @@ function TraceView({ session }: { session: SessionDetailDTO }) {
 	return (
 		<div className="trj">
 			<div className="trj-toolbar">
-				<div className="trj-modes" role="tablist" aria-label={t("detail.trace")}>
+				<div
+					className="trj-modes"
+					role="tablist"
+					aria-label={t("detail.trace")}
+					onKeyDown={(event) => {
+						if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+						event.preventDefault();
+						const next = mode === "turns" ? "calls" : "turns";
+						setMode(next);
+						const target = event.currentTarget.querySelector<HTMLButtonElement>(`[data-mode="${next}"]`);
+						target?.focus();
+					}}
+				>
 					<button
 						type="button"
 						role="tab"
+						data-mode="turns"
+						tabIndex={mode === "turns" ? 0 : -1}
 						aria-selected={mode === "turns"}
+						aria-controls="trace-panel"
 						className={mode === "turns" ? "on" : ""}
 						onClick={() => setMode("turns")}
 					>
@@ -228,7 +257,10 @@ function TraceView({ session }: { session: SessionDetailDTO }) {
 					<button
 						type="button"
 						role="tab"
+						data-mode="calls"
+						tabIndex={mode === "calls" ? 0 : -1}
 						aria-selected={mode === "calls"}
+						aria-controls="trace-panel"
 						className={mode === "calls" ? "on" : ""}
 						onClick={() => setMode("calls")}
 					>
@@ -255,7 +287,7 @@ function TraceView({ session }: { session: SessionDetailDTO }) {
 			) : (
 				<>
 					<TimelineOverview groups={groups} start={start} end={end} />
-					<div className="trj-tablewrap">
+					<div className="trj-tablewrap" id="trace-panel" role="tabpanel">
 						<table className="trj-table">
 							<thead>
 								<tr>
@@ -304,7 +336,7 @@ function TraceView({ session }: { session: SessionDetailDTO }) {
 								</tbody>
 							)}
 						</table>
-						{mode === "calls" && q && shown.length === 0 && (
+						{q && shown.length === 0 && (
 							<p className="muted trj-empty">{t("trace.noMatch")}</p>
 						)}
 					</div>
@@ -473,7 +505,7 @@ function LedgerRow({
 					<summary>
 						<span className="trj-summary">
 							<RecordSummary record={record} />
-							{record.kind === "tool" && todo && <span className="trj-todo">任务 {todo.done}/{todo.total}</span>}
+							{record.kind === "tool" && todo && <span className="trj-todo">{t("detail.todoProgress", { done: todo.done, total: todo.total })}</span>}
 						</span>
 					</summary>
 					<RecordDetail record={record} />
@@ -581,10 +613,6 @@ function CacheMetric({ session }: { session: SessionDetailDTO }) {
 			{t("metrics.cacheRate", { pct: Math.round(rate * 100) })}
 		</span>
 	);
-}
-
-function fmtTokens(n: number): string {
-	return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 
 function fmtClock(ms: number): string {
